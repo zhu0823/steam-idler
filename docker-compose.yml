@@ -1,7 +1,8 @@
 services:
   steam-idler:
-    build: .
-    image: steam-idler:latest
+    image: ghcr.io/zhu0823/steam-idler:latest
+    # 不使用 GHCR 镜像、改为本地构建时取消注释
+    # build: .
     container_name: steam-idler
     restart: unless-stopped
     # data 目录需对该 UID 可写，NAS 上可改成自己的 PUID/PGID

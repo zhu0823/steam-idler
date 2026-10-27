@@ -10,13 +10,23 @@
 
 ## 部署（Docker）
 
+推送到 `main` 后，GitHub Actions 会先跑测试，再构建 `linux/amd64`、`linux/arm64` 镜像并推送到 `ghcr.io/zhu0823/steam-idler:latest`（另带 `sha-<提交>` 标签）。
+
+仓库是私有的，镜像默认也是私有的，NAS/VPS 拉取前需要先登录 GHCR。到 GitHub → Settings → Developer settings → Personal access tokens 创建一个只勾选 `read:packages` 的 token，然后：
+
 ```bash
-# 1. 上传本目录到 NAS/VPS 后进入目录
+echo <token> | docker login ghcr.io -u zhu0823 --password-stdin
+```
+
+部署只需要 `docker-compose.yml` 和 `.env.example` 两个文件：
+
+```bash
+# 1. 准备目录
 cp .env.example .env          # 可选，按需修改
 mkdir -p data
 
-# 2. 构建镜像
-docker compose build
+# 2. 拉取镜像（本地构建则在 docker-compose.yml 中启用 build 后执行 docker compose build）
+docker compose pull
 
 # 3. 首次登录：扫码（推荐）
 docker compose run --rm -it steam-idler node src/login.js
@@ -26,6 +36,9 @@ docker compose run --rm -it steam-idler node src/login.js --password
 # 4. 后台运行
 docker compose up -d
 docker compose logs -f
+
+# 更新到最新镜像
+docker compose pull && docker compose up -d
 ```
 
 `data/` 目录需对容器用户可写。群晖、威联通等 NAS 上若遇到 `EACCES`，把 `.env` 里的 `PUID`/`PGID` 改成目录所有者的 UID/GID（`id` 命令可查），或执行 `chown -R 1000:1000 data`。
