@@ -491,3 +491,42 @@ td:first-child {
     margin-top: 16px;
   }
 }
+
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.account-card {
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.account-card:hover {
+  border-color: var(--primary);
+}
+
+.account-card p {
+  margin: 0;
+}
+
+.account-card .row {
+  margin-top: 6px;
+}
+
+.log-account {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--off-bg);
+  color: var(--text);
+}
+
+.card-head > button {
+  white-space: nowrap;
+  flex-shrink: 0;
+}

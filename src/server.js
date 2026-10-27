@@ -28,16 +28,29 @@ function parseTrustProxy(value) {
   return v;
 }
 
+const SETTING_KEYS = ['maxConcurrent', 'hoursUntilDrops', 'checkIntervalMinutes', 'personaState', 'machineName'];
+
+// 只取挂卡参数白名单字段
+function pickSettings(body) {
+  const src = body && typeof body === 'object' ? body : {};
+  return Object.fromEntries(SETTING_KEYS.filter((k) => src[k] !== undefined).map((k) => [k, src[k]]));
+}
+
+function badRequest(err) {
+  err.statusCode = err.statusCode || 400;
+  return err;
+}
+
 /**
  * @param {object} deps
  * @param {import('./auth').Auth} deps.auth
- * @param {import('./idler').Idler} deps.idler
+ * @param {import('./accounts').AccountManager} deps.accounts
  * @param {import('./steam-login').LoginFlow} deps.loginFlow
  * @param {object} deps.log
  * @param {string} [deps.staticDir] 前端构建产物目录
  * @param {boolean|string} [deps.trustProxy] Fastify trustProxy 取值，只信任指定来源的 X-Forwarded-*
  */
-function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = false }) {
+function buildServer({ auth, accounts, loginFlow, log, staticDir, trustProxy = false }) {
   const app = Fastify({ logger: false, trustProxy, bodyLimit: 64 * 1024 });
   app.register(require('@fastify/cookie'));
 
@@ -123,32 +136,61 @@ function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = fals
       return { ok: true };
     });
 
-    api.get('/api/status', async () => ({ idler: idler.status(), login: loginFlow.status() }));
+    api.get('/api/status', async () => ({ ...accounts.status(), login: loginFlow.status() }));
 
     api.get('/api/logs', async () => log.recent());
 
-    api.get('/api/config', async () => idler.config);
+    // 全局默认挂卡参数
+    api.get('/api/config', async () => accounts.status().global);
 
     api.put('/api/config', async (req) => {
-      const { maxConcurrent, hoursUntilDrops, checkIntervalMinutes, skipAppIds, personaState, machineName } = req.body || {};
-      const patch = Object.fromEntries(
-        Object.entries({ maxConcurrent, hoursUntilDrops, checkIntervalMinutes, skipAppIds, personaState, machineName })
-          .filter(([, v]) => v !== undefined),
-      );
       try {
-        const config = idler.setConfig(patch);
-        log.info('挂卡配置已更新');
+        const config = accounts.setGlobalConfig(pickSettings(req.body));
+        log.info('全局挂卡参数已更新');
         return config;
       } catch (err) {
-        err.statusCode = err.statusCode || 400;
-        throw err;
+        throw badRequest(err);
       }
     });
 
-    api.post('/api/idler/pause', async () => idler.setConfig({ paused: true }));
-    api.post('/api/idler/resume', async () => idler.setConfig({ paused: false }));
-    api.post('/api/idler/check', async () => {
-      idler.checkNow();
+    // 单个账号：跳过列表与参数覆盖（overrides 为 null 表示使用全局默认值）
+    api.put('/api/accounts/:id/config', async (req) => {
+      const body = req.body || {};
+      const patch = {};
+      if (body.skipAppIds !== undefined) patch.skipAppIds = body.skipAppIds;
+      if (body.overrides !== undefined) patch.overrides = body.overrides === null ? null : pickSettings(body.overrides);
+      const idler = accounts.get(req.params.id);
+      try {
+        const config = idler.setAccountConfig(patch);
+        idler.log.info('账号挂卡配置已更新');
+        return config;
+      } catch (err) {
+        throw badRequest(err);
+      }
+    });
+
+    api.post('/api/accounts/:id/pause', async (req) => accounts.setAccountConfig(req.params.id, { paused: true }));
+    api.post('/api/accounts/:id/resume', async (req) => accounts.setAccountConfig(req.params.id, { paused: false }));
+    api.post('/api/accounts/:id/check', async (req) => {
+      accounts.get(req.params.id).checkNow();
+      return { ok: true };
+    });
+    api.post('/api/accounts/:id/remove', async (req) => {
+      await accounts.remove(req.params.id);
+      return { ok: true };
+    });
+
+    // 批量操作
+    api.post('/api/bulk/pause', async () => {
+      accounts.pauseAll();
+      return { ok: true };
+    });
+    api.post('/api/bulk/resume', async () => {
+      accounts.resumeAll();
+      return { ok: true };
+    });
+    api.post('/api/bulk/check', async () => {
+      accounts.checkAll();
       return { ok: true };
     });
 
@@ -164,12 +206,6 @@ function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = fals
     api.post('/api/steam/login/cancel', async () => {
       loginFlow.cancel();
       return loginFlow.status();
-    });
-
-    api.post('/api/steam/logout', async () => {
-      loginFlow.cancel();
-      await idler.logout();
-      return { ok: true };
     });
 
     // 服务端推送：挂卡状态、登录流程、日志
@@ -198,10 +234,10 @@ function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = fals
         }
       };
 
-      send('status', idler.status());
+      send('status', accounts.status());
       send('login', loginFlow.status());
       send('logs', log.recent());
-      idler.on('status', onStatus);
+      accounts.on('status', onStatus);
       loginFlow.on('update', onLogin);
       log.bus.on('entry', onLog);
       auth.on('sessions', recheck);
@@ -212,7 +248,7 @@ function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = fals
 
       res.on('close', () => {
         clearInterval(heartbeat);
-        idler.off('status', onStatus);
+        accounts.off('status', onStatus);
         loginFlow.off('update', onLogin);
         log.bus.off('entry', onLog);
         auth.off('sessions', recheck);

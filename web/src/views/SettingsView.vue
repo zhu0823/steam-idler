@@ -1,7 +1,7 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue';
-import { api, live } from '../api';
-import { extraIdsText, mergeSkipIds, parseIdList } from '../skip-ids.mjs';
+import { onMounted, reactive, ref } from 'vue';
+import { api } from '../api';
+import SettingsFields from '../components/SettingsFields.vue';
 
 const form = reactive({
   maxConcurrent: 32,
@@ -9,55 +9,18 @@ const form = reactive({
   checkIntervalMinutes: 15,
   personaState: 'online',
   machineName: '',
-  skipAppIds: [],
 });
-const extraIds = ref('');
 const saved = ref('');
 const error = ref('');
 const busy = ref(false);
-
-// 徽章页中出现过的游戏可以直接勾选；其他 appid 手动填写
-const knownGames = computed(() => [...(live.status?.games || [])].sort((a, b) => a.name.localeCompare(b.name)));
-const knownIds = computed(() => new Set(knownGames.value.map((g) => g.appid)));
-
-function load(config) {
-  Object.assign(form, {
-    maxConcurrent: config.maxConcurrent,
-    hoursUntilDrops: config.hoursUntilDrops,
-    checkIntervalMinutes: config.checkIntervalMinutes,
-    personaState: config.personaState,
-    machineName: config.machineName,
-    skipAppIds: [...config.skipAppIds],
-  });
-  extraIds.value = extraIdsText(config.skipAppIds, knownIds.value);
-}
-
-// 游戏列表晚于配置加载时，把已出现在列表中的 AppID 从文本框移到复选框
-watch(knownIds, (known) => {
-  const { ids, valid } = parseIdList(extraIds.value);
-  if (!valid) return;
-  form.skipAppIds = [...new Set([...form.skipAppIds, ...ids])];
-  extraIds.value = extraIdsText(ids, known);
-});
-
-function toggleSkip(appid, checked) {
-  form.skipAppIds = checked ? [...form.skipAppIds, appid] : form.skipAppIds.filter((id) => id !== appid);
-}
 
 async function save() {
   error.value = '';
   saved.value = '';
   busy.value = true;
-  const extra = parseIdList(extraIds.value);
-  if (!extra.valid) {
-    error.value = '其他跳过的 AppID 只能填写正整数，用逗号分隔';
-    busy.value = false;
-    return;
-  }
   try {
-    const skipAppIds = mergeSkipIds(form.skipAppIds, knownIds.value, extra.ids);
-    load(await api('PUT', '/api/config', { ...form, skipAppIds }));
-    saved.value = '已保存并生效';
+    Object.assign(form, await api('PUT', '/api/config', { ...form }));
+    saved.value = '已保存，未单独设置参数的账号立即生效';
   } catch (err) {
     error.value = err.message;
   } finally {
@@ -88,7 +51,7 @@ async function changePassword() {
 
 onMounted(async () => {
   try {
-    load(await api('GET', '/api/config'));
+    Object.assign(form, await api('GET', '/api/config'));
   } catch (err) {
     error.value = err.message;
   }
@@ -97,54 +60,10 @@ onMounted(async () => {
 
 <template>
   <section class="card">
-    <h2>挂卡设置</h2>
+    <h2>全局默认挂卡参数</h2>
+    <p class="muted small">所有账号默认使用这里的参数；需要不同参数的账号可以在账号详情页单独设置。跳过的游戏在各账号详情页设置。</p>
     <form class="form" @submit.prevent="save">
-      <div class="grid">
-        <label>
-          同时挂的游戏数上限
-          <input v-model.number="form.maxConcurrent" type="number" min="1" max="32" required />
-          <span class="muted small">1–32，Steam 最多允许 32 个</span>
-        </label>
-        <label>
-          单独挂的时长阈值（小时）
-          <input v-model.number="form.hoursUntilDrops" type="number" min="0" max="100" step="0.5" required />
-          <span class="muted small">未达到阈值的游戏同时挂；0 表示始终逐个挂</span>
-        </label>
-        <label>
-          检查间隔（分钟）
-          <input v-model.number="form.checkIntervalMinutes" type="number" min="5" max="1440" required />
-          <span class="muted small">定时读取徽章页的间隔，最小 5 分钟</span>
-        </label>
-        <label>
-          在线状态
-          <select v-model="form.personaState">
-            <option value="online">在线</option>
-            <option value="invisible">隐身</option>
-            <option value="offline">离线</option>
-          </select>
-        </label>
-        <label>
-          设备名称
-          <input v-model="form.machineName" maxlength="64" required />
-          <span class="muted small">显示在 Steam 授权设备列表中，下次登录 Steam 时生效</span>
-        </label>
-      </div>
-
-      <fieldset>
-        <legend>跳过的游戏</legend>
-        <p v-if="knownGames.length === 0" class="muted small">登录 Steam 并完成一次检查后，这里会列出可掉卡的游戏。</p>
-        <div v-else class="checklist">
-          <label v-for="g in knownGames" :key="g.appid" class="check">
-            <input type="checkbox" :checked="form.skipAppIds.includes(g.appid)" @change="toggleSkip(g.appid, $event.target.checked)" />
-            <span>{{ g.name }} <span class="muted mono">{{ g.appid }}</span></span>
-          </label>
-        </div>
-        <label>
-          其他要跳过的 AppID
-          <input v-model="extraIds" placeholder="例如：570, 730" spellcheck="false" />
-        </label>
-      </fieldset>
-
+      <SettingsFields :form="form" />
       <p v-if="error" class="alert error">{{ error }}</p>
       <p v-if="saved" class="alert ok">{{ saved }}</p>
       <button class="primary" :disabled="busy">{{ busy ? '保存中…' : '保存设置' }}</button>

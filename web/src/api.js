@@ -65,6 +65,19 @@ export function disconnectEvents() {
   live.connected = false;
 }
 
+export const STATE_TEXT = {
+  logged_out: ['未登录', 'off'],
+  connecting: ['连接中', 'warn'],
+  running: ['挂卡中', 'ok'],
+  paused: ['已暂停', 'warn'],
+  blocked: ['其他设备游戏中', 'warn'],
+  auth_failed: ['凭据失效', 'error'],
+};
+
+export function accountName(account) {
+  return account?.account?.accountName || account?.id || '';
+}
+
 export function fmtTime(value) {
   if (!value) return '—';
   return new Date(value).toLocaleString('zh-CN', { hour12: false });

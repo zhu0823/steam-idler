@@ -1,4 +1,10 @@
-// data 目录下的持久化文件：挂卡配置、Steam 登录凭据
+// data 目录下的持久化文件：全局挂卡配置、各账号的登录凭据与配置
+//
+// data/
+//   config.json                 全局默认挂卡参数
+//   accounts/<SteamID64>/
+//     token.json                该账号的 refresh token
+//     config.json               该账号的跳过列表、暂停状态、参数覆盖
 const fs = require('fs');
 const path = require('path');
 const log = require('./log');
@@ -7,25 +13,35 @@ const dataDir = path.resolve(process.env.DATA_DIR || path.join(__dirname, '..', 
 
 const files = {
   config: path.join(dataDir, 'config.json'),
-  token: path.join(dataDir, 'refresh_token.json'),
+  accounts: path.join(dataDir, 'accounts'),
   admin: path.join(dataDir, 'admin.json'),
   setupCode: path.join(dataDir, 'setup_code'),
   steamUser: path.join(dataDir, 'steam-user'),
+  // 单账号版本的凭据文件，启动时迁移到 accounts/ 下
+  legacyToken: path.join(dataDir, 'refresh_token.json'),
 };
 
 const PERSONA_STATES = ['online', 'invisible', 'offline'];
 
-const DEFAULT_CONFIG = {
+// 挂卡参数：全局默认值，账号可整体覆盖
+const DEFAULT_SETTINGS = {
   // 同时挂的游戏数上限，Steam 限制为 32
   maxConcurrent: 32,
   // 游玩时长达到该值后改为单独挂；0 表示始终逐个挂
   hoursUntilDrops: 2,
   checkIntervalMinutes: 15,
-  skipAppIds: [],
   personaState: 'online',
   machineName: 'steam-idler',
-  paused: false,
 };
+
+const DEFAULT_ACCOUNT_CONFIG = {
+  skipAppIds: [],
+  paused: false,
+  // null 表示使用全局默认参数
+  overrides: null,
+};
+
+const ACCOUNT_ID_RE = /^\d{5,20}$/;
 
 function readJson(file) {
   if (!fs.existsSync(file)) return null;
@@ -34,14 +50,10 @@ function readJson(file) {
 
 // 先写临时文件再 rename，避免写到一半导致文件损坏
 function writeJson(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);
-}
-
-function removeFile(file) {
-  fs.rmSync(file, { force: true });
 }
 
 function ensureWritable() {
@@ -61,22 +73,31 @@ function clampInt(value, min, max, name) {
   return Math.min(Math.max(Math.round(n), min), max);
 }
 
-// 校验并补全配置，非法字段抛出错误，缺失字段使用默认值
-function normalizeConfig(input = {}) {
-  const c = { ...DEFAULT_CONFIG, ...input };
+// 校验并补全挂卡参数，非法字段抛出错误，缺失字段使用默认值
+function normalizeSettings(input = {}) {
+  const c = { ...DEFAULT_SETTINGS, ...input };
   const personaState = String(c.personaState).toLowerCase();
   if (!PERSONA_STATES.includes(personaState)) throw new Error('personaState 只能是 online / invisible / offline');
   const machineName = String(c.machineName).trim().slice(0, 64);
-  if (!Array.isArray(c.skipAppIds)) throw new Error('skipAppIds 必须是数组');
-
   return {
     maxConcurrent: clampInt(c.maxConcurrent, 1, 32, 'maxConcurrent'),
     hoursUntilDrops: Math.min(Math.max(Number(c.hoursUntilDrops) || 0, 0), 100),
     checkIntervalMinutes: clampInt(c.checkIntervalMinutes, 5, 1440, 'checkIntervalMinutes'),
-    skipAppIds: [...new Set(c.skipAppIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))],
     personaState,
-    machineName: machineName || DEFAULT_CONFIG.machineName,
+    machineName: machineName || DEFAULT_SETTINGS.machineName,
+  };
+}
+
+function normalizeAccountConfig(input = {}) {
+  const c = { ...DEFAULT_ACCOUNT_CONFIG, ...input };
+  if (!Array.isArray(c.skipAppIds)) throw new Error('skipAppIds 必须是数组');
+  if (c.overrides !== null && (typeof c.overrides !== 'object' || Array.isArray(c.overrides))) {
+    throw new Error('overrides 必须是对象或 null');
+  }
+  return {
+    skipAppIds: [...new Set(c.skipAppIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))],
     paused: Boolean(c.paused),
+    overrides: c.overrides ? normalizeSettings(c.overrides) : null,
   };
 }
 
@@ -86,62 +107,138 @@ function backupBroken(file, reason) {
   try {
     fs.renameSync(file, backup);
   } catch {}
-  log.warn(`${path.basename(file)} 无法解析（${reason}），已备份为 ${path.basename(backup)}`);
+  log.warn(`${path.relative(dataDir, file)} 无法解析（${reason}），已备份为 ${path.basename(backup)}`);
 }
 
-// 配置文件损坏时使用默认值；个别字段非法时只丢弃该字段
-function loadConfig() {
+// 文件损坏时使用默认值；个别字段非法时只丢弃该字段
+function loadLenient(file, defaults, normalize) {
   let raw;
   try {
-    raw = readJson(files.config) || {};
+    raw = readJson(file) || {};
   } catch (err) {
-    backupBroken(files.config, err.message);
-    return { ...DEFAULT_CONFIG };
+    backupBroken(file, err.message);
+    return normalize({});
   }
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    backupBroken(files.config, '不是 JSON 对象');
-    return { ...DEFAULT_CONFIG };
+    backupBroken(file, '不是 JSON 对象');
+    return normalize({});
   }
   try {
-    return normalizeConfig(raw);
+    return normalize(raw);
   } catch {
     const valid = {};
-    for (const key of Object.keys(DEFAULT_CONFIG)) {
+    for (const key of Object.keys(defaults)) {
       if (!(key in raw)) continue;
       try {
-        normalizeConfig({ [key]: raw[key] });
+        normalize({ [key]: raw[key] });
         valid[key] = raw[key];
       } catch (err) {
-        log.warn(`配置项 ${key} 无效（${err.message}），已改用默认值`);
+        log.warn(`${path.relative(dataDir, file)} 中的 ${key} 无效（${err.message}），已改用默认值`);
       }
     }
-    return normalizeConfig(valid);
+    return normalize(valid);
   }
 }
 
-function saveConfig(patch) {
-  const next = normalizeConfig({ ...loadConfig(), ...patch });
+// ---------- 全局默认参数 ----------
+
+function loadGlobalConfig() {
+  return loadLenient(files.config, DEFAULT_SETTINGS, normalizeSettings);
+}
+
+function saveGlobalConfig(patch) {
+  const next = normalizeSettings({ ...loadGlobalConfig(), ...patch });
   writeJson(files.config, next);
   return next;
 }
 
-function loadToken() {
+// ---------- 账号 ----------
+
+function accountDir(id) {
+  if (!ACCOUNT_ID_RE.test(String(id))) throw Object.assign(new Error('账号 ID 无效'), { statusCode: 400 });
+  return path.join(files.accounts, String(id));
+}
+
+function listAccountIds() {
+  if (!fs.existsSync(files.accounts)) return [];
+  return fs
+    .readdirSync(files.accounts)
+    .filter((id) => ACCOUNT_ID_RE.test(id) && fs.existsSync(path.join(files.accounts, id, 'token.json')))
+    .sort();
+}
+
+function loadAccountToken(id) {
+  const file = path.join(accountDir(id), 'token.json');
   let t;
   try {
-    t = readJson(files.token);
+    t = readJson(file);
   } catch (err) {
-    backupBroken(files.token, err.message);
+    backupBroken(file, err.message);
     return null;
   }
   return t && t.refreshToken ? t : null;
 }
 
-function saveToken(data) {
-  writeJson(files.token, { ...data, savedAt: new Date().toISOString() });
+function saveAccountToken(id, data) {
+  writeJson(path.join(accountDir(id), 'token.json'), { ...data, steamID: String(id), savedAt: new Date().toISOString() });
 }
 
-function clearToken() {
-  removeFile(files.token);
+function loadAccountConfig(id) {
+  return loadLenient(path.join(accountDir(id), 'config.json'), DEFAULT_ACCOUNT_CONFIG, normalizeAccountConfig);
+}
+
+function saveAccountConfig(id, patch) {
+  const next = normalizeAccountConfig({ ...loadAccountConfig(id), ...patch });
+  writeJson(path.join(accountDir(id), 'config.json'), next);
+  return next;
+}
+
+function removeAccount(id) {
+  fs.rmSync(accountDir(id), { recursive: true, force: true });
+}
+
+// 账号实际生效的配置：全局默认值或账号覆盖值 + 账号自己的跳过列表与暂停状态
+function effectiveConfig(id) {
+  const account = loadAccountConfig(id);
+  return {
+    ...(account.overrides || loadGlobalConfig()),
+    skipAppIds: account.skipAppIds,
+    paused: account.paused,
+    customized: account.overrides !== null,
+  };
+}
+
+// 单账号版本升级：refresh_token.json 移到 accounts/<SteamID>/，原配置中的跳过列表和暂停状态归入该账号
+function migrateLegacy() {
+  if (!fs.existsSync(files.legacyToken)) return null;
+  let token;
+  try {
+    token = readJson(files.legacyToken);
+  } catch (err) {
+    backupBroken(files.legacyToken, err.message);
+    return null;
+  }
+  if (!token || !token.refreshToken || !ACCOUNT_ID_RE.test(String(token.steamID || ''))) {
+    log.warn('旧版凭据文件缺少 SteamID，无法迁移，请在面板中重新登录该账号');
+    backupBroken(files.legacyToken, '缺少 SteamID');
+    return null;
+  }
+  const id = String(token.steamID);
+  let legacyConfig = {};
+  try {
+    legacyConfig = readJson(files.config) || {};
+  } catch {}
+
+  if (!fs.existsSync(path.join(accountDir(id), 'token.json'))) saveAccountToken(id, token);
+  saveAccountConfig(id, {
+    skipAppIds: Array.isArray(legacyConfig.skipAppIds) ? legacyConfig.skipAppIds : [],
+    paused: Boolean(legacyConfig.paused),
+  });
+  // 重写全局配置，去掉已归入账号的字段
+  writeJson(files.config, loadGlobalConfig());
+  fs.rmSync(files.legacyToken, { force: true });
+  log.info(`已将旧版单账号数据迁移到 accounts/${id}`);
+  return id;
 }
 
 // 解析 JWT 的过期时间，仅用于展示，不做校验
@@ -157,16 +254,22 @@ function tokenExpiresAt(refreshToken) {
 module.exports = {
   dataDir,
   files,
-  DEFAULT_CONFIG,
+  DEFAULT_SETTINGS,
+  DEFAULT_ACCOUNT_CONFIG,
   readJson,
   writeJson,
-  removeFile,
   ensureWritable,
-  normalizeConfig,
-  loadConfig,
-  saveConfig,
-  loadToken,
-  saveToken,
-  clearToken,
+  normalizeSettings,
+  normalizeAccountConfig,
+  loadGlobalConfig,
+  saveGlobalConfig,
+  listAccountIds,
+  loadAccountToken,
+  saveAccountToken,
+  loadAccountConfig,
+  saveAccountConfig,
+  removeAccount,
+  effectiveConfig,
+  migrateLegacy,
   tokenExpiresAt,
 };

@@ -2,7 +2,7 @@ const path = require('path');
 const store = require('./store');
 const log = require('./log');
 const { Auth, formatSetupCode } = require('./auth');
-const { Idler } = require('./idler');
+const { AccountManager } = require('./accounts');
 const { LoginFlow } = require('./steam-login');
 const { buildServer, parseTrustProxy } = require('./server');
 
@@ -32,17 +32,17 @@ const auth = new Auth({
   onSetupCode: (code) => listening && printSetupCode(code),
 });
 
-const idler = new Idler();
+const accounts = new AccountManager();
 const loginFlow = new LoginFlow({
   onAuthenticated: async (info) => {
     log.info(`Steam 登录成功：${info.accountName}`);
-    await idler.useToken(info);
+    await accounts.upsert(info);
   },
 });
 
 const app = buildServer({
   auth,
-  idler,
+  accounts,
   loginFlow,
   log,
   staticDir: path.join(__dirname, '..', 'web', 'dist'),
@@ -66,8 +66,7 @@ async function main() {
     reminder.unref();
   }
 
-  idler.start();
-  if (!store.loadToken()) log.info('尚未登录 Steam，请在管理面板中登录');
+  accounts.start();
 }
 
 async function shutdown() {
@@ -75,7 +74,7 @@ async function shutdown() {
   const force = setTimeout(() => process.exit(0), 8_000);
   force.unref();
   loginFlow.cancel();
-  await idler.shutdown().catch(() => {});
+  await accounts.shutdown().catch(() => {});
   await app.close().catch(() => {});
   process.exit(0);
 }

@@ -7,52 +7,114 @@ const path = require('path');
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'idler-store-'));
 const store = require('../src/store');
 
+const A = '76561190000000001';
+const B = '76561190000000002';
+
+function reset() {
+  fs.rmSync(store.dataDir, { recursive: true, force: true });
+  fs.mkdirSync(store.dataDir, { recursive: true });
+}
+
+test.beforeEach(reset);
+
 test('没有配置文件时使用默认值', () => {
-  assert.deepStrictEqual(store.loadConfig(), store.DEFAULT_CONFIG);
+  assert.deepStrictEqual(store.loadGlobalConfig(), store.DEFAULT_SETTINGS);
+  assert.deepStrictEqual(store.listAccountIds(), []);
 });
 
-test('保存配置时校验并限制取值范围', () => {
-  const c = store.saveConfig({
-    maxConcurrent: 100,
-    checkIntervalMinutes: 1,
-    hoursUntilDrops: -3,
-    skipAppIds: ['570', 570, 'abc', -1, 730],
-    personaState: 'INVISIBLE',
-    machineName: '  ',
-  });
-  assert.strictEqual(c.maxConcurrent, 32);
-  assert.strictEqual(c.checkIntervalMinutes, 5);
-  assert.strictEqual(c.hoursUntilDrops, 0);
+test('全局参数保存时校验并限制取值范围', () => {
+  const c = store.saveGlobalConfig({ maxConcurrent: 100, checkIntervalMinutes: 1, hoursUntilDrops: -3, personaState: 'INVISIBLE', machineName: '  ' });
+  assert.deepStrictEqual(c, { maxConcurrent: 32, hoursUntilDrops: 0, checkIntervalMinutes: 5, personaState: 'invisible', machineName: 'steam-idler' });
+  assert.deepStrictEqual(store.loadGlobalConfig(), c);
+  assert.throws(() => store.saveGlobalConfig({ personaState: 'busy' }), /personaState/);
+  assert.deepStrictEqual(store.loadGlobalConfig(), c);
+});
+
+test('账号凭据与配置按 SteamID 分目录保存，权限为 600', () => {
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  store.saveAccountToken(B, { accountName: 'bob', refreshToken: 'tb' });
+  assert.deepStrictEqual(store.listAccountIds(), [A, B]);
+  assert.strictEqual(store.loadAccountToken(A).refreshToken, 'ta');
+  assert.strictEqual(store.loadAccountToken(B).steamID, B);
+  const file = path.join(store.files.accounts, A, 'token.json');
+  assert.strictEqual((fs.statSync(file).mode & 0o777).toString(8), '600');
+
+  store.removeAccount(A);
+  assert.deepStrictEqual(store.listAccountIds(), [B]);
+  assert.strictEqual(store.loadAccountToken(A), null);
+});
+
+test('账号 ID 必须是数字，防止路径穿越', () => {
+  assert.throws(() => store.loadAccountToken('../admin'), { statusCode: 400 });
+  assert.throws(() => store.removeAccount('..'), { statusCode: 400 });
+  fs.mkdirSync(path.join(store.files.accounts, 'not-an-id'), { recursive: true });
+  assert.deepStrictEqual(store.listAccountIds(), []);
+});
+
+test('生效配置：默认使用全局值，开启覆盖后使用账号值，跳过列表与暂停按账号', () => {
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  store.saveGlobalConfig({ maxConcurrent: 10 });
+  store.saveAccountConfig(A, { skipAppIds: ['570', 570, 'x', 730], paused: true });
+
+  let c = store.effectiveConfig(A);
+  assert.strictEqual(c.maxConcurrent, 10);
   assert.deepStrictEqual(c.skipAppIds, [570, 730]);
-  assert.strictEqual(c.personaState, 'invisible');
-  assert.strictEqual(c.machineName, 'steam-idler');
-  assert.deepStrictEqual(store.loadConfig(), c);
+  assert.strictEqual(c.paused, true);
+  assert.strictEqual(c.customized, false);
+
+  store.saveAccountConfig(A, { overrides: { maxConcurrent: 3, personaState: 'offline' } });
+  c = store.effectiveConfig(A);
+  assert.strictEqual(c.maxConcurrent, 3);
+  assert.strictEqual(c.personaState, 'offline');
+  assert.strictEqual(c.hoursUntilDrops, 2);
+  assert.strictEqual(c.customized, true);
+  // 覆盖后全局值变化不影响该账号
+  store.saveGlobalConfig({ maxConcurrent: 20 });
+  assert.strictEqual(store.effectiveConfig(A).maxConcurrent, 3);
+
+  store.saveAccountConfig(A, { overrides: null });
+  assert.strictEqual(store.effectiveConfig(A).maxConcurrent, 20);
+  assert.throws(() => store.saveAccountConfig(A, { overrides: [1] }), /overrides/);
 });
 
-test('非法配置抛出错误且不写入', () => {
-  const before = store.loadConfig();
-  assert.throws(() => store.saveConfig({ personaState: 'busy' }), /personaState/);
-  assert.throws(() => store.saveConfig({ maxConcurrent: 'abc' }), /maxConcurrent/);
-  assert.deepStrictEqual(store.loadConfig(), before);
+test('旧版单账号数据迁移到 accounts/<SteamID>', () => {
+  fs.writeFileSync(store.files.legacyToken, JSON.stringify({ accountName: 'alice', steamID: A, refreshToken: 'legacy' }));
+  fs.writeFileSync(store.files.config, JSON.stringify({ maxConcurrent: 8, skipAppIds: [570], paused: true, personaState: 'invisible' }));
+
+  assert.strictEqual(store.migrateLegacy(), A);
+  assert.ok(!fs.existsSync(store.files.legacyToken));
+  assert.strictEqual(store.loadAccountToken(A).refreshToken, 'legacy');
+  assert.deepStrictEqual(store.loadAccountConfig(A), { skipAppIds: [570], paused: true, overrides: null });
+  const global = JSON.parse(fs.readFileSync(store.files.config, 'utf8'));
+  assert.deepStrictEqual(global, { maxConcurrent: 8, hoursUntilDrops: 2, checkIntervalMinutes: 15, personaState: 'invisible', machineName: 'steam-idler' });
+
+  // 再次启动不会重复迁移
+  assert.strictEqual(store.migrateLegacy(), null);
 });
 
-test('部分更新保留其他字段，暂停状态持久化', () => {
-  store.saveConfig({ maxConcurrent: 8 });
-  const c = store.saveConfig({ paused: true });
-  assert.strictEqual(c.maxConcurrent, 8);
-  assert.strictEqual(store.loadConfig().paused, true);
+test('旧版凭据缺少 SteamID 时备份并跳过迁移', () => {
+  fs.writeFileSync(store.files.legacyToken, JSON.stringify({ accountName: 'alice', refreshToken: 'legacy' }));
+  assert.strictEqual(store.migrateLegacy(), null);
+  assert.ok(fs.readdirSync(store.dataDir).some((f) => f.startsWith('refresh_token.json.broken-')));
+  assert.deepStrictEqual(store.listAccountIds(), []);
 });
 
-test('凭据读写与过期时间解析', () => {
-  assert.strictEqual(store.loadToken(), null);
-  const exp = Math.floor(Date.now() / 1000) + 3600;
-  const jwt = `x.${Buffer.from(JSON.stringify({ exp })).toString('base64url')}.y`;
-  store.saveToken({ accountName: 'a', steamID: '1', refreshToken: jwt });
-  assert.strictEqual(store.loadToken().refreshToken, jwt);
-  assert.strictEqual(store.tokenExpiresAt(jwt).getTime(), exp * 1000);
-  assert.strictEqual((fs.statSync(store.files.token).mode & 0o777).toString(8), '600');
-  store.clearToken();
-  assert.strictEqual(store.loadToken(), null);
+test('配置文件损坏时备份并使用默认值，个别字段非法时只丢弃该字段', () => {
+  fs.writeFileSync(store.files.config, '{ broken json');
+  assert.deepStrictEqual(store.loadGlobalConfig(), store.DEFAULT_SETTINGS);
+  assert.ok(fs.readdirSync(store.dataDir).some((f) => f.startsWith('config.json.broken-')));
+
+  fs.writeFileSync(store.files.config, JSON.stringify({ maxConcurrent: 6, personaState: 'away' }));
+  const c = store.loadGlobalConfig();
+  assert.strictEqual(c.maxConcurrent, 6);
+  assert.strictEqual(c.personaState, 'online');
+
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  fs.writeFileSync(path.join(store.files.accounts, A, 'config.json'), JSON.stringify({ skipAppIds: 'x', paused: true }));
+  assert.deepStrictEqual(store.loadAccountConfig(A), { skipAppIds: [], paused: true, overrides: null });
+
+  fs.writeFileSync(path.join(store.files.accounts, A, 'token.json'), 'not json');
+  assert.strictEqual(store.loadAccountToken(A), null);
 });
 
 test('数据目录不可写时给出明确提示', { skip: process.getuid && process.getuid() === 0 }, () => {
@@ -66,24 +128,4 @@ test('数据目录不可写时给出明确提示', { skip: process.getuid && pro
   }).toString();
   fs.chmodSync(ro, 0o700);
   assert.match(out, /不可写.*PUID\/PGID/);
-});
-
-test('配置文件损坏时备份并使用默认值，个别字段非法时只丢弃该字段', () => {
-  fs.writeFileSync(store.files.config, '{ broken json');
-  assert.deepStrictEqual(store.loadConfig(), store.DEFAULT_CONFIG);
-  const backups = fs.readdirSync(store.dataDir).filter((f) => f.startsWith('config.json.broken-'));
-  assert.strictEqual(backups.length, 1);
-  assert.ok(!fs.existsSync(store.files.config));
-
-  fs.writeFileSync(store.files.config, JSON.stringify({ maxConcurrent: 6, personaState: 'away', skipAppIds: 'x' }));
-  const c = store.loadConfig();
-  assert.strictEqual(c.maxConcurrent, 6);
-  assert.strictEqual(c.personaState, 'online');
-  assert.deepStrictEqual(c.skipAppIds, []);
-  // 仍可通过保存修复
-  assert.strictEqual(store.saveConfig({ personaState: 'invisible' }).maxConcurrent, 6);
-
-  fs.writeFileSync(store.files.token, 'not json');
-  assert.strictEqual(store.loadToken(), null);
-  assert.ok(fs.readdirSync(store.dataDir).some((f) => f.startsWith('refresh_token.json.broken-')));
 });

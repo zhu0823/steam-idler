@@ -2,7 +2,11 @@
 import { computed, ref } from 'vue';
 import { api, live } from '../api';
 
-defineProps({ reason: { type: String, default: '' } });
+defineProps({
+  title: { type: String, default: '添加 Steam 账号' },
+  reason: { type: String, default: '' },
+  hint: { type: String, default: '' },
+});
 
 const method = ref('qr');
 const accountName = ref('');
@@ -55,8 +59,9 @@ function switchMethod(m) {
 
 <template>
   <section class="card">
-    <h2>登录 Steam</h2>
+    <h2>{{ title }}</h2>
     <p v-if="reason" class="alert warn">{{ reason }}</p>
+    <p v-if="hint" class="muted small">{{ hint }}</p>
 
     <div class="segmented">
       <button :class="{ active: method === 'qr' }" @click="switchMethod('qr')">扫码登录（推荐）</button>
