@@ -122,3 +122,26 @@ test('密码错误、超时与取消', async () => {
   await assert.rejects(flow.submitCode('1'), { statusCode: 409 });
   await assert.rejects(flow.startCredentials('', ''), { statusCode: 400 });
 });
+
+test('无需 Steam Guard 或验证码已通过时进入 authenticating', async () => {
+  const flow = new LoginFlow({
+    createSession: () => {
+      const s = new FakeSession();
+      s.startWithCredentials = async () => ({ actionRequired: false });
+      return s;
+    },
+    onAuthenticated: async () => {},
+  });
+  const s = await flow.startCredentials('tester', 'secret');
+  assert.strictEqual(s.state, 'authenticating');
+
+  // 验证码提交成功但 Steam 尚未返回结果
+  const deferred = makeFlow({ validActions: [{ type: EAuthSessionGuardType.DeviceCode }] });
+  await deferred.flow.startCredentials('tester', 'secret');
+  deferred.sessions[0].submitSteamGuardCode = async () => {};
+  const after = await deferred.flow.submitCode('12345');
+  assert.strictEqual(after.state, 'authenticating');
+  deferred.sessions[0].authenticate();
+  await tick();
+  assert.strictEqual(deferred.flow.status().state, 'authenticated');
+});

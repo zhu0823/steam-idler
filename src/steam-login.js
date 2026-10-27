@@ -25,6 +25,7 @@ function describeError(err) {
  * - scanned         已扫码，等待在手机上确认
  * - need_code       需要输入手机令牌 / 邮箱验证码
  * - need_confirm    需要在 App 或邮件中确认
+ * - authenticating  无需（或已完成）验证，等待 Steam 返回登录结果
  * - authenticated   登录成功
  * - failed          失败（超时、密码错误等）
  */
@@ -140,6 +141,8 @@ class LoginFlow extends EventEmitter {
       const result = await session.startWithCredentials({ accountName, password });
       if (this.session !== session) return this.status();
       if (result.actionRequired) this.applyGuards(result.validActions);
+      // 未开启 Steam Guard 或机器令牌有效时无需验证，正在轮询登录结果
+      else if (this.state === 'idle') this.update({ state: 'authenticating', error: null });
     } catch (err) {
       if (this.session === session) this.fail(describeError(err));
     }
@@ -174,6 +177,7 @@ class LoginFlow extends EventEmitter {
     const session = this.session;
     try {
       await session.submitSteamGuardCode(String(code || '').trim());
+      if (this.session === session && this.state === 'need_code') this.update({ state: 'authenticating', error: null });
     } catch (err) {
       // 验证码错误时保留会话，允许重新输入
       if (this.session === session) this.update({ error: describeError(err) });

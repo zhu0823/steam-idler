@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { api, live } from '../api';
+import { extraIdsText, mergeSkipIds, parseIdList } from '../skip-ids.mjs';
 
 const form = reactive({
   maxConcurrent: 32,
@@ -28,8 +29,16 @@ function load(config) {
     machineName: config.machineName,
     skipAppIds: [...config.skipAppIds],
   });
-  extraIds.value = config.skipAppIds.filter((id) => !knownIds.value.has(id)).join(', ');
+  extraIds.value = extraIdsText(config.skipAppIds, knownIds.value);
 }
+
+// 游戏列表晚于配置加载时，把已出现在列表中的 AppID 从文本框移到复选框
+watch(knownIds, (known) => {
+  const { ids, valid } = parseIdList(extraIds.value);
+  if (!valid) return;
+  form.skipAppIds = [...new Set([...form.skipAppIds, ...ids])];
+  extraIds.value = extraIdsText(ids, known);
+});
 
 function toggleSkip(appid, checked) {
   form.skipAppIds = checked ? [...form.skipAppIds, appid] : form.skipAppIds.filter((id) => id !== appid);
@@ -39,14 +48,14 @@ async function save() {
   error.value = '';
   saved.value = '';
   busy.value = true;
-  const extra = extraIds.value.split(/[\s,，]+/).filter(Boolean).map(Number);
-  if (extra.some((n) => !Number.isInteger(n) || n <= 0)) {
+  const extra = parseIdList(extraIds.value);
+  if (!extra.valid) {
     error.value = '其他跳过的 AppID 只能填写正整数，用逗号分隔';
     busy.value = false;
     return;
   }
   try {
-    const skipAppIds = [...form.skipAppIds.filter((id) => knownIds.value.has(id)), ...extra];
+    const skipAppIds = mergeSkipIds(form.skipAppIds, knownIds.value, extra.ids);
     load(await api('PUT', '/api/config', { ...form, skipAppIds }));
     saved.value = '已保存并生效';
   } catch (err) {

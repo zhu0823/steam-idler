@@ -4,11 +4,11 @@ const log = require('./log');
 const { Auth, formatSetupCode } = require('./auth');
 const { Idler } = require('./idler');
 const { LoginFlow } = require('./steam-login');
-const { buildServer } = require('./server');
+const { buildServer, parseTrustProxy } = require('./server');
 
 const PORT = Number(process.env.PORT) || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
-const TRUST_PROXY = /^(1|true|yes)$/i.test(process.env.TRUST_PROXY || '');
+const TRUST_PROXY = parseTrustProxy(process.env.TRUST_PROXY);
 const SETUP_REMINDER_MS = 10 * 60_000;
 
 try {

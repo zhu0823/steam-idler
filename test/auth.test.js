@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { Auth, CODE_ALPHABET, CODE_LENGTH, normalizeSetupCode } = require('../src/auth');
+const { Auth, CODE_ALPHABET, CODE_LENGTH, MAX_FAILS_GLOBAL, normalizeSetupCode } = require('../src/auth');
 
 function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idler-auth-'));
@@ -102,4 +102,64 @@ test('删除 admin.json 后重新进入初始化流程', async () => {
   assert.ok(fs.existsSync(files.setupCode));
   await auth.setup('1.1.1.1', code, 'password456');
   assert.ok(auth.isInitialized());
+});
+
+test('并发登录无法绕过单 IP 限制，且同时计算哈希的请求数受限', async () => {
+  const { auth } = setup();
+  await auth.setup('1.1.1.1', auth.ensureSetupCode(), 'password123');
+
+  const sameIp = await Promise.allSettled(Array.from({ length: 20 }, () => auth.login('6.6.6.6', 'bad-password')));
+  const codes = sameIp.map((r) => r.reason.statusCode);
+  assert.strictEqual(codes.filter((c) => c === 401).length <= 5, true);
+  assert.strictEqual(codes.filter((c) => c === 429).length >= 15, true);
+  // 锁定期间正确密码也被拒绝
+  await assert.rejects(auth.login('6.6.6.6', 'password123'), { statusCode: 429 });
+
+  const manyIps = await Promise.allSettled(Array.from({ length: 10 }, (_, i) => auth.login(`7.7.7.${i}`, 'bad-password')));
+  const hashed = manyIps.filter((r) => r.reason.statusCode === 401).length;
+  assert.strictEqual(hashed, 4, '同时最多 4 个请求进入 scrypt');
+});
+
+test('轮换 IP 累计失败达到全局上限后整体锁定', async () => {
+  const { auth, advance } = setup();
+  await auth.setup('1.1.1.1', auth.ensureSetupCode(), 'password123');
+  for (let i = 0; i < MAX_FAILS_GLOBAL; i++) {
+    await assert.rejects(auth.login(`8.8.${i}.1`, 'bad-password'), { statusCode: 401 });
+  }
+  await assert.rejects(auth.login('9.9.9.9', 'password123'), { statusCode: 429 });
+  advance(15 * 60_000 + 1);
+  await auth.login('9.9.9.9', 'password123');
+});
+
+test('吊销会话：只影响该会话，并发出 sessions 事件', async () => {
+  const { auth } = setup();
+  const a = await auth.setup('1.1.1.1', auth.ensureSetupCode(), 'password123');
+  const b = await auth.login('1.1.1.1', 'password123');
+  let events = 0;
+  auth.on('sessions', () => events++);
+
+  auth.revokeSession(a.token);
+  assert.ok(!auth.verifySession(a.token));
+  assert.ok(auth.verifySession(b.token));
+  assert.strictEqual(events, 1);
+
+  // 吊销无效令牌不报错也不触发事件
+  auth.revokeSession('garbage');
+  assert.strictEqual(events, 1);
+
+  await auth.changePassword('1.1.1.1', 'password123', 'another-pass-1');
+  assert.strictEqual(events, 2);
+});
+
+test('并发提交初始化只有一个成功', async () => {
+  const { auth } = setup();
+  const code = auth.ensureSetupCode();
+  const results = await Promise.allSettled([
+    auth.setup('1.1.1.1', code, 'password-one'),
+    auth.setup('2.2.2.2', code, 'password-two'),
+  ]);
+  assert.strictEqual(results.filter((r) => r.status === 'fulfilled').length, 1);
+  assert.strictEqual(results.find((r) => r.status === 'rejected').reason.statusCode, 409);
+  await auth.login('3.3.3.3', 'password-one');
+  await assert.rejects(auth.login('3.3.3.3', 'password-two'), { statusCode: 401 });
 });

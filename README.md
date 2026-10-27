@@ -67,6 +67,12 @@ docker compose pull && docker compose up -d
 
 Steam 登录状态（`data/refresh_token.json`）和挂卡配置（`data/config.json`）不受影响，重新初始化期间挂卡照常进行。
 
+## 面板登录保护
+
+- 同一 IP 连续输错面板密码 5 次锁定 15 分钟；所有来源合计输错 30 次时，面板登录会整体暂停 15 分钟（期间管理员也需等待），用于防止轮换 IP 猜密码。
+- 退出面板会吊销当前会话；修改面板密码会让其他设备上的会话和已打开的页面立即失效。
+- `data/config.json` 或 `data/refresh_token.json` 损坏时，程序会把原文件备份为 `*.broken-<时间戳>` 并使用默认值启动，不会反复重启。
+
 ## 使用
 
 - **登录 Steam**：概览页选择“扫码登录”，用 Steam 手机 App 扫码并确认；或选择“账号密码”，按提示输入令牌/邮箱验证码或在 App 中确认。
@@ -93,7 +99,7 @@ Steam 登录状态（`data/refresh_token.json`）和挂卡配置（`data/config.
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `WEB_PORT` | 8080 | 面板映射到宿主机的端口 |
-| `TRUST_PROXY` | false | 在反向代理之后时设为 `true` |
+| `TRUST_PROXY` | false | 在反向代理之后时设为 `true`（只信任本机和内网来源的代理），或填写代理的 IP/CIDR 列表 |
 | `PUID` / `PGID` | 1000 | 容器运行用户 |
 | `TZ` | Asia/Shanghai | 时区 |
 

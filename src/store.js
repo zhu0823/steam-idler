@@ -1,6 +1,7 @@
 // data 目录下的持久化文件：挂卡配置、Steam 登录凭据
 const fs = require('fs');
 const path = require('path');
+const log = require('./log');
 
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(__dirname, '..', 'data'));
 
@@ -79,8 +80,43 @@ function normalizeConfig(input = {}) {
   };
 }
 
+// 损坏的文件改名备份，避免启动失败且无法通过网页修复
+function backupBroken(file, reason) {
+  const backup = `${file}.broken-${Date.now()}`;
+  try {
+    fs.renameSync(file, backup);
+  } catch {}
+  log.warn(`${path.basename(file)} 无法解析（${reason}），已备份为 ${path.basename(backup)}`);
+}
+
+// 配置文件损坏时使用默认值；个别字段非法时只丢弃该字段
 function loadConfig() {
-  return normalizeConfig(readJson(files.config) || {});
+  let raw;
+  try {
+    raw = readJson(files.config) || {};
+  } catch (err) {
+    backupBroken(files.config, err.message);
+    return { ...DEFAULT_CONFIG };
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    backupBroken(files.config, '不是 JSON 对象');
+    return { ...DEFAULT_CONFIG };
+  }
+  try {
+    return normalizeConfig(raw);
+  } catch {
+    const valid = {};
+    for (const key of Object.keys(DEFAULT_CONFIG)) {
+      if (!(key in raw)) continue;
+      try {
+        normalizeConfig({ [key]: raw[key] });
+        valid[key] = raw[key];
+      } catch (err) {
+        log.warn(`配置项 ${key} 无效（${err.message}），已改用默认值`);
+      }
+    }
+    return normalizeConfig(valid);
+  }
 }
 
 function saveConfig(patch) {
@@ -90,7 +126,13 @@ function saveConfig(patch) {
 }
 
 function loadToken() {
-  const t = readJson(files.token);
+  let t;
+  try {
+    t = readJson(files.token);
+  } catch (err) {
+    backupBroken(files.token, err.message);
+    return null;
+  }
   return t && t.refreshToken ? t : null;
 }
 

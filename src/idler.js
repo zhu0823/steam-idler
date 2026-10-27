@@ -30,7 +30,11 @@ const PERSONA = {
  * - auth_failed  登录凭据失效，需要重新登录
  */
 class Idler extends EventEmitter {
-  constructor() {
+  /**
+   * @param {object} [opts]
+   * @param {object} [opts.client] 用于测试注入的 SteamUser 实例
+   */
+  constructor({ client } = {}) {
     super();
     this.config = store.loadConfig();
     this.state = 'logged_out';
@@ -47,17 +51,18 @@ class Idler extends EventEmitter {
     this.checkTimer = null;
     this.retryTimer = null;
     this.intervalTimer = null;
-    this.client = this.createClient();
+    this.client = this.bindClient(
+      client ||
+        new SteamUser({
+          dataDirectory: store.files.steamUser,
+          renewRefreshTokens: true,
+          autoRelogin: true,
+        }),
+    );
     this.resetInterval();
   }
 
-  createClient() {
-    const client = new SteamUser({
-      dataDirectory: store.files.steamUser,
-      renewRefreshTokens: true,
-      autoRelogin: true,
-    });
-
+  bindClient(client) {
     client.on('refreshToken', (refreshToken) => {
       const saved = store.loadToken() || {};
       store.saveToken({ ...saved, refreshToken });
@@ -160,7 +165,14 @@ class Idler extends EventEmitter {
   }
 
   async logOffClient() {
-    if (!this.client.steamID) return;
+    if (!this.client.steamID) {
+      // 正在连接或处于自动重连等待中：logOff 会关闭连接并取消 steam-user 的重连定时器，
+      // 否则之后会用已删除的凭据重新登录
+      try {
+        this.client.logOff();
+      } catch {}
+      return;
+    }
     this.loggingOff = true;
     await new Promise((resolve) => {
       const timer = setTimeout(resolve, 5_000);

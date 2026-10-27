@@ -95,6 +95,10 @@ function switchMethod(m) {
           <button type="button" @click="cancel">取消</button>
         </div>
       </form>
+      <template v-else-if="active && login.state === 'authenticating'">
+        <p class="alert ok">验证已通过，正在登录 Steam…</p>
+        <button @click="cancel">取消</button>
+      </template>
       <template v-else-if="active && login.state === 'need_confirm'">
         <p class="alert ok">{{ login.codeType === 'email' ? '请打开 Steam 发送的确认邮件并点击确认链接。' : '请在 Steam 手机 App 中确认本次登录。' }}</p>
         <button @click="cancel">取消</button>

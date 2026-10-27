@@ -67,3 +67,23 @@ test('数据目录不可写时给出明确提示', { skip: process.getuid && pro
   fs.chmodSync(ro, 0o700);
   assert.match(out, /不可写.*PUID\/PGID/);
 });
+
+test('配置文件损坏时备份并使用默认值，个别字段非法时只丢弃该字段', () => {
+  fs.writeFileSync(store.files.config, '{ broken json');
+  assert.deepStrictEqual(store.loadConfig(), store.DEFAULT_CONFIG);
+  const backups = fs.readdirSync(store.dataDir).filter((f) => f.startsWith('config.json.broken-'));
+  assert.strictEqual(backups.length, 1);
+  assert.ok(!fs.existsSync(store.files.config));
+
+  fs.writeFileSync(store.files.config, JSON.stringify({ maxConcurrent: 6, personaState: 'away', skipAppIds: 'x' }));
+  const c = store.loadConfig();
+  assert.strictEqual(c.maxConcurrent, 6);
+  assert.strictEqual(c.personaState, 'online');
+  assert.deepStrictEqual(c.skipAppIds, []);
+  // 仍可通过保存修复
+  assert.strictEqual(store.saveConfig({ personaState: 'invisible' }).maxConcurrent, 6);
+
+  fs.writeFileSync(store.files.token, 'not json');
+  assert.strictEqual(store.loadToken(), null);
+  assert.ok(fs.readdirSync(store.dataDir).some((f) => f.startsWith('refresh_token.json.broken-')));
+});

@@ -4,7 +4,10 @@ const path = require('path');
 const Fastify = require('fastify');
 
 const COOKIE = 'sid';
+const CSRF_HEADER = 'x-requested-with';
+const CSRF_VALUE = 'steam-idler';
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const SSE_RECHECK_MS = 25_000;
 
 const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
@@ -15,13 +18,24 @@ const SECURITY_HEADERS = {
 };
 
 /**
+ * TRUST_PROXY=true 时只信任本机和内网来源（同机反代、Docker 网桥），
+ * 公网客户端直连端口时伪造的 X-Forwarded-For 不会被采纳；也可直接填写 IP/CIDR 列表。
+ */
+function parseTrustProxy(value) {
+  const v = String(value || '').trim();
+  if (!v || /^(0|false|no)$/i.test(v)) return false;
+  if (/^(1|true|yes)$/i.test(v)) return 'loopback,linklocal,uniquelocal';
+  return v;
+}
+
+/**
  * @param {object} deps
  * @param {import('./auth').Auth} deps.auth
  * @param {import('./idler').Idler} deps.idler
  * @param {import('./steam-login').LoginFlow} deps.loginFlow
  * @param {object} deps.log
  * @param {string} [deps.staticDir] 前端构建产物目录
- * @param {boolean} [deps.trustProxy]
+ * @param {boolean|string} [deps.trustProxy] Fastify trustProxy 取值，只信任指定来源的 X-Forwarded-*
  */
 function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = false }) {
   const app = Fastify({ logger: false, trustProxy, bodyLimit: 64 * 1024 });
@@ -32,21 +46,16 @@ function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = fals
     return payload;
   });
 
-  // CSRF 防护：写操作只接受 JSON，且 Origin 必须与当前站点一致
+  // CSRF 防护：写操作只接受 JSON，并要求自定义请求头（跨站请求带该头会触发 CORS 预检而被浏览器拦截）。
+  // 不比较 Origin 与 Host，因为反向代理（如 Nginx 默认配置）会改写 Host。
   app.addHook('onRequest', async (req, reply) => {
     if (!req.url.startsWith('/api/') || !MUTATING.has(req.method)) return;
     if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
       return reply.code(415).send({ error: '请求必须为 JSON' });
     }
-    const origin = req.headers.origin;
-    if (origin) {
-      let host;
-      try {
-        host = new URL(origin).host;
-      } catch {
-        host = null;
-      }
-      if (host !== req.headers.host) return reply.code(403).send({ error: '跨站请求被拒绝' });
+    const fetchSite = req.headers['sec-fetch-site'];
+    if (req.headers[CSRF_HEADER] !== CSRF_VALUE || (fetchSite && fetchSite !== 'same-origin')) {
+      return reply.code(403).send({ error: '跨站请求被拒绝' });
     }
   });
 
@@ -95,7 +104,8 @@ function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = fals
     return { ok: true };
   });
 
-  app.post('/api/auth/logout', async (_req, reply) => {
+  app.post('/api/auth/logout', async (req, reply) => {
+    auth.revokeSession(req.cookies[COOKIE]);
     reply.clearCookie(COOKIE, { path: '/' });
     return { ok: true };
   });
@@ -172,10 +182,21 @@ function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = fals
         Connection: 'keep-alive',
         'X-Accel-Buffering': 'no',
       });
-      const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      const send = (event, data) => {
+        if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      };
       const onStatus = (s) => send('status', s);
       const onLogin = (s) => send('login', s);
       const onLog = (e) => send('log', e);
+
+      const token = req.cookies[COOKIE];
+      // 会话被吊销、改密码或过期后立即断开，避免已建立的连接继续接收数据
+      const recheck = () => {
+        if (!res.writableEnded && !auth.verifySession(token)) {
+          send('auth', { authenticated: false });
+          res.end();
+        }
+      };
 
       send('status', idler.status());
       send('login', loginFlow.status());
@@ -183,13 +204,18 @@ function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = fals
       idler.on('status', onStatus);
       loginFlow.on('update', onLogin);
       log.bus.on('entry', onLog);
-      const heartbeat = setInterval(() => res.write(': ping\n\n'), 25_000);
+      auth.on('sessions', recheck);
+      const heartbeat = setInterval(() => {
+        if (!res.writableEnded) res.write(': ping\n\n');
+        recheck();
+      }, SSE_RECHECK_MS);
 
-      req.raw.on('close', () => {
+      res.on('close', () => {
         clearInterval(heartbeat);
         idler.off('status', onStatus);
         loginFlow.off('update', onLogin);
         log.bus.off('entry', onLog);
+        auth.off('sessions', recheck);
       });
     });
   });
@@ -211,4 +237,4 @@ function buildServer({ auth, idler, loginFlow, log, staticDir, trustProxy = fals
   return app;
 }
 
-module.exports = { buildServer };
+module.exports = { buildServer, parseTrustProxy };
