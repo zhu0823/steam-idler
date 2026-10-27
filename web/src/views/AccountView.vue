@@ -65,7 +65,7 @@ async function action(path, confirmText) {
         <button v-else class="btn" @click="action('pause')"><Icon name="pause" />暂停</button>
         <button class="btn" :disabled="account.state !== 'running'" @click="action('check')"><Icon name="refresh" />立即检查</button>
       </template>
-      <button class="btn ghost" @click="openAdd(name)">重新登录</button>
+      <button class="btn" @click="openAdd(name)"><Icon name="login" />重新登录</button>
       <button class="btn danger" @click="action('remove', `确定移除账号 ${name} 吗？会退出 Steam 登录并删除该账号的凭据、设置和掉卡记录。`)">移除</button>
     </div>
   </section>
