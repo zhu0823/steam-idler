@@ -28,7 +28,24 @@ docker compose pull           # 本地构建则在 docker-compose.yml 中启用 
 docker compose up -d
 ```
 
-然后浏览器打开 `http://<NAS 或 VPS 地址>:8080`，按下文完成初始化并登录 Steam。
+面板默认只监听宿主机的 `127.0.0.1:8600`，按使用场景选择访问方式：
+
+- **VPS**：用 Nginx/Caddy 反向代理到 `http://127.0.0.1:8600` 并配置 HTTPS，`.env` 中设置 `TRUST_PROXY=true`；或用 SSH 隧道临时访问（见“安全建议”）。
+- **NAS 内网**：在 `.env` 中设置 `WEB_BIND=0.0.0.0`，然后浏览器打开 `http://<NAS 地址>:8600`。
+
+打开面板后按下文完成初始化并登录 Steam。
+
+Nginx 反向代理示例（实时推送使用 SSE，需关闭缓冲）：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8600;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+}
+```
 
 更新到最新镜像：
 
@@ -48,7 +65,7 @@ docker compose pull && docker compose up -d
   docker compose logs steam-idler | grep "SETUP CODE"
   ```
 
-  输出形如 `[steam-idler] SETUP CODE: K7QM-4XPD  (open http://<host>:8080 to create admin password)`。
+  输出形如 `[steam-idler] SETUP CODE: K7QM-4XPD  (open the web panel to create admin password)`。
 - NAS 图形界面（群晖 Container Manager、威联通 Container Station、Unraid、Portainer 等）：在该容器的“日志”页查找 `SETUP CODE`。
 - 文件：用 NAS 文件管理器打开数据目录下的 `data/setup_code`。
 
@@ -82,11 +99,13 @@ Steam 登录状态（`data/refresh_token.json`）和挂卡配置（`data/config.
 ## 安全建议
 
 - 管理面板可以控制你的 Steam 账号，请设置足够强的面板密码。
-- **VPS 上不要把面板直接暴露在公网 HTTP 上**：把 `docker-compose.yml` 的端口改为 `127.0.0.1:8080:8080`，再通过 Nginx/Caddy 反向代理加 HTTPS（并设置 `TRUST_PROXY=true`），或用 SSH 隧道访问：
+- **VPS 上不要把面板直接暴露在公网 HTTP 上**：保持默认的 `WEB_BIND=127.0.0.1`，通过 Nginx/Caddy 反向代理加 HTTPS（并设置 `TRUST_PROXY=true`），或用 SSH 隧道访问后打开 `http://localhost:8600`：
 
   ```bash
-  ssh -L 8080:127.0.0.1:8080 user@your-vps
+  ssh -L 8600:127.0.0.1:8600 user@your-vps
   ```
+
+  注意 Docker 发布的端口会绕过 ufw 等防火墙，设置 `WEB_BIND=0.0.0.0` 即等于对外开放。
 
 - 优先使用扫码登录，Steam 密码不经过网络传输到面板。
 - `data/` 目录下的 `refresh_token.json` 可以直接登录你的 Steam 账号，请勿上传或分享。
@@ -98,7 +117,8 @@ Steam 登录状态（`data/refresh_token.json`）和挂卡配置（`data/config.
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `WEB_PORT` | 8080 | 面板映射到宿主机的端口 |
+| `WEB_PORT` | 8600 | 面板映射到宿主机的端口 |
+| `WEB_BIND` | 127.0.0.1 | 面板监听的宿主机地址；NAS 内网直接访问时设为 `0.0.0.0` |
 | `TRUST_PROXY` | false | 在反向代理之后时设为 `true`（只信任本机和内网来源的代理），或填写代理的 IP/CIDR 列表 |
 | `PUID` / `PGID` | 1000 | 容器运行用户 |
 | `TZ` | Asia/Shanghai | 时区 |

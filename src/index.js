@@ -22,7 +22,8 @@ let listening = false;
 
 // 初始化码只输出到控制台；该行保持纯 ASCII，避免部分 NAS 日志界面乱码
 function printSetupCode(code) {
-  log.raw(`[steam-idler] SETUP CODE: ${formatSetupCode(code)}  (open http://<host>:${PORT} to create admin password)`);
+  // 容器内端口与宿主机映射端口不同，这里不输出端口避免误导
+  log.raw(`[steam-idler] SETUP CODE: ${formatSetupCode(code)}  (open the web panel to create admin password)`);
   log.raw(`[steam-idler] 首次使用：打开管理面板，输入上面的初始化码并创建管理员密码；初始化码也保存在 ${store.files.setupCode}`);
 }
 
@@ -50,7 +51,7 @@ const app = buildServer({
 
 async function main() {
   await app.listen({ port: PORT, host: HOST });
-  log.info(`管理面板已启动：http://${HOST === '0.0.0.0' ? '<host>' : HOST}:${PORT}`);
+  log.info(`管理面板已启动，监听 ${HOST}:${PORT}（Docker 部署时宿主机端口以 docker-compose.yml 的映射为准）`);
 
   // 先生成（或读取）初始化码再开启回调输出，避免首次启动重复打印
   const setupCode = auth.ensureSetupCode();

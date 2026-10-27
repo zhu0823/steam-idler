@@ -8,8 +8,9 @@ services:
     # data 目录需对该 UID 可写，NAS 上可改成自己的 PUID/PGID
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
-      # VPS 上建议改为 "127.0.0.1:${WEB_PORT:-8080}:8080"，再通过反向代理（HTTPS）或 SSH 隧道访问
-      - "${WEB_PORT:-8080}:8080"
+      # 默认只在本机监听，通过反向代理（HTTPS）或 SSH 隧道访问；
+      # NAS 上需要局域网直接访问时，在 .env 中设置 WEB_BIND=0.0.0.0
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8600}:8080"
     env_file:
       - path: .env
         required: false
