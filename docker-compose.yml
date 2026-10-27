@@ -1,0 +1,20 @@
+services:
+  steam-idler:
+    build: .
+    image: steam-idler:latest
+    container_name: steam-idler
+    restart: unless-stopped
+    # data 目录需对该 UID 可写，NAS 上可改成自己的 PUID/PGID
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
