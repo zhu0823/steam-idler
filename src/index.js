@@ -4,6 +4,7 @@ const log = require('./log');
 const { Auth, formatSetupCode } = require('./auth');
 const { AccountManager } = require('./accounts');
 const { LoginFlow } = require('./steam-login');
+const { Notifier } = require('./notify');
 const { buildServer, parseTrustProxy } = require('./server');
 
 const PORT = Number(process.env.PORT) || 8080;
@@ -32,7 +33,8 @@ const auth = new Auth({
   onSetupCode: (code) => listening && printSetupCode(code),
 });
 
-const accounts = new AccountManager();
+const notifier = new Notifier();
+const accounts = new AccountManager({ notifier });
 const loginFlow = new LoginFlow({
   onAuthenticated: async (info) => {
     log.info(`Steam 登录成功：${info.accountName}`);
@@ -44,6 +46,7 @@ const app = buildServer({
   auth,
   accounts,
   loginFlow,
+  notifier,
   log,
   staticDir: path.join(__dirname, '..', 'web', 'dist'),
   trustProxy: TRUST_PROXY,

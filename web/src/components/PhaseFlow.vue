@@ -1,7 +1,7 @@
 <script setup>
 // 账号详情的两阶段挂卡进度
 import { computed } from 'vue';
-import { fmtClock, fmtDuration } from '../api';
+import { FARMING_ORDER_TEXT, fmtClock, fmtDuration } from '../api';
 import DropPips from './DropPips.vue';
 import Icon from './Icon.vue';
 
@@ -18,6 +18,11 @@ const step1State = computed(() => {
   if (phase.value.mode === 'multi') return '进行中';
   return notReady.value.length ? '等待中' : '已完成';
 });
+const orderText = computed(() => {
+  const text = FARMING_ORDER_TEXT[props.account.config.farmingOrder] || FARMING_ORDER_TEXT.hours;
+  return props.account.config.priorityAppIds?.length ? `优先队列在前，其余${text}` : text;
+});
+const boosting = computed(() => props.account.boosting || []);
 const step2State = computed(() => (phase.value.mode === 'solo' ? '进行中' : ready.value ? '等待中' : '未开始'));
 </script>
 
@@ -53,8 +58,12 @@ const step2State = computed(() => (phase.value.mode === 'solo' ? '进行中' : r
           <div class="d">正在挂 {{ phase.game.name }}，掉完自动换下一个</div>
           <div class="row d"><DropPips :count="phase.game.drops" /> 还能掉 {{ phase.game.drops }} 张</div>
         </template>
-        <div v-else class="d">满 {{ threshold }} 小时后按时长从多到少逐个挂{{ ready ? `，已有 ${ready} 个游戏满足` : '' }}</div>
+        <div v-else class="d">满 {{ threshold }} 小时后逐个挂（{{ orderText }}）{{ ready ? `，已有 ${ready} 个游戏满足` : '' }}</div>
       </div>
     </div>
+
+    <p v-if="boosting.length" class="callout info small">
+      <Icon name="info" />可挂的卡片已全部掉完，正在挂 {{ boosting.length }} 个游戏累计时长：{{ boosting.map((g) => g.name).join('、') }}
+    </p>
   </section>
 </template>

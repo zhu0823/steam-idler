@@ -9,12 +9,14 @@ class AccountManager extends EventEmitter {
    * @param {object} [opts]
    * @param {(id:string)=>object} [opts.createClient] 用于测试注入 SteamUser 实例
    * @param {object} [opts.idlerOptions] 传给每个 Idler 的额外参数（测试用）
+   * @param {import('./notify').Notifier} [opts.notifier] 账号事件的通知发送者
    */
-  constructor({ createClient, idlerOptions = {} } = {}) {
+  constructor({ createClient, idlerOptions = {}, notifier = null } = {}) {
     super();
     this.setMaxListeners(0);
     this.createClient = createClient;
     this.idlerOptions = idlerOptions;
+    this.notifier = notifier;
     this.idlers = new Map();
   }
 
@@ -28,6 +30,9 @@ class AccountManager extends EventEmitter {
   add(id) {
     const idler = new Idler({ ...this.idlerOptions, id, client: this.createClient ? this.createClient(id) : undefined });
     idler.on('status', () => this.emit('status', this.status()));
+    idler.on('notify', (msg) => {
+      if (this.notifier) this.notifier.send({ ...msg, account: { id: idler.id, name: idler.tag.name } });
+    });
     this.idlers.set(idler.id, idler);
     return idler;
   }
@@ -59,6 +64,7 @@ class AccountManager extends EventEmitter {
     const idler = this.get(id);
     this.idlers.delete(idler.id);
     idler.removeAllListeners('status');
+    idler.removeAllListeners('notify');
     await idler.shutdown();
     store.removeAccount(idler.id);
     log.info(`已移除账号：${idler.tag.name}`);

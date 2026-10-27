@@ -74,6 +74,15 @@ export const STATE_TEXT = {
   auth_failed: ['凭据失效', 'err'],
 };
 
+export const FARMING_ORDERS = [
+  ['hours', '时长最多的优先'],
+  ['fewestDrops', '剩余卡少的优先'],
+  ['mostDrops', '剩余卡多的优先'],
+  ['name', '按游戏名称'],
+  ['badge', '徽章页顺序'],
+];
+export const FARMING_ORDER_TEXT = Object.fromEntries(FARMING_ORDERS);
+
 export function accountName(account) {
   return account?.account?.accountName || account?.id || '';
 }

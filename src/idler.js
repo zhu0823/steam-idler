@@ -4,7 +4,7 @@ const SteamUser = require('steam-user');
 const store = require('./store');
 const log = require('./log');
 const { fetchAllDroppable, NotLoggedInError } = require('./badges');
-const { planIdle } = require('./planner');
+const { annotateGames, planIdle, refundableLicenses, refundableApps, gameSlots, playPayload } = require('./planner');
 const { detectDrops, phaseOf, estimateMinutes, dropsOnDay } = require('./progress');
 
 const { EResult, EPersonaState } = SteamUser;
@@ -14,6 +14,17 @@ const AUTH_ERRORS = new Set([
   EResult.InvalidPassword, EResult.AccessDenied, EResult.Expired, EResult.Revoked,
   EResult.AccountLogonDenied, EResult.AccountLoginDeniedNeedTwoFactor, EResult.InvalidSignature,
 ]);
+
+// PICS 请求超时；steam-user 默认等待长达 1 小时
+const PICS_TIMEOUT_MS = 60_000;
+
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 // 多个账号的徽章页请求串行执行并留出间隔，避免同一 IP 短时间内请求过多
 const BADGE_GAP_MS = 3_000;
@@ -32,6 +43,10 @@ const PERSONA = {
 
 /**
  * 单个 Steam 账号的挂卡流程。
+ *
+ * 事件：
+ * - status  状态变化，参数为 status()
+ * - notify  需要推送通知的事件：{ event: 'drops'|'finished'|'authFailed', title, text }
  *
  * 状态：
  * - logged_out   没有凭据
@@ -62,14 +77,20 @@ class Idler extends EventEmitter {
     this.blocked = false;
     this.checking = false;
     this.loggingOff = false;
-    this.current = []; // 当前正在挂的 appid
-    this.playing = [];
+    this.current = null; // 最近一次上报给 Steam 的“正在游戏”列表，null 表示需要重新上报
+    this.playing = []; // 正在挂卡的游戏
+    this.boosting = []; // 卡片掉完后正在挂时长的游戏 { appid, name }
     this.games = []; // 最近一次读取的可掉卡游戏（含已跳过）
+    // 退款期内的游戏：appid → 退款截止时间；许可证变化后需要重新计算
+    this.refundable = new Map();
+    this.refundDirty = true;
+    this.appNames = new Map();
     this.lastCheckAt = null;
     this.fetchBadges = fetchBadges;
     this.badgeGapMs = badgeGapMs;
     // 上一次读取的各游戏剩余掉落，用于识别掉卡；重启后第一次检查只建立基准
     this.prevDrops = null;
+    this.prevActiveDrops = null;
     this.dropHistory = store.loadDropHistory(this.id);
     this.lastError = null;
     this.checkTimer = null;
@@ -98,11 +119,17 @@ class Idler extends EventEmitter {
 
     client.on('loggedOn', () => {
       this.log.info(`已登录 Steam：${client.steamID.getSteamID64()}`);
-      this.current = [];
+      this.current = null;
       this.playing = [];
       this.lastError = null;
       client.setPersona(PERSONA[this.config.personaState] ?? EPersonaState.Online);
       this.refreshState();
+    });
+
+    // 登录时和购买、激活新游戏后触发
+    client.on('licenses', () => {
+      this.refundDirty = true;
+      if (this.lastCheckAt) this.scheduleCheck(30_000);
     });
 
     client.on('webSession', (_sessionID, cookies) => {
@@ -113,8 +140,9 @@ class Idler extends EventEmitter {
     client.on('playingState', (isBlocked, playingApp) => {
       if (isBlocked && !this.blocked) {
         this.blocked = true;
-        this.current = [];
+        this.current = null;
         this.playing = [];
+        this.boosting = [];
         this.log.info(`账号正在其他设备上游戏（appid ${playingApp}），暂停挂卡`);
         this.refreshState();
       } else if (!isBlocked && this.blocked) {
@@ -138,8 +166,9 @@ class Idler extends EventEmitter {
 
     client.on('error', (err) => {
       this.cookies = null;
-      this.current = [];
+      this.current = null;
       this.playing = [];
+      this.boosting = [];
       this.lastError = err.message;
       if (err.eresult === EResult.LoggedInElsewhere) {
         // 在电脑上启动游戏并选择“继续”时，Steam 会踢掉本会话
@@ -148,6 +177,7 @@ class Idler extends EventEmitter {
       } else if (AUTH_ERRORS.has(err.eresult)) {
         this.log.error(`登录凭据已失效（${err.message}），请在网页上重新登录 Steam`);
         this.setState('auth_failed');
+        this.notify('authFailed', '登录凭据已失效', `挂卡已停止（${err.message}），请在管理面板中重新登录该账号。`);
       } else {
         this.log.error(`Steam 错误：${err.message}`);
         this.retryLogOn(5);
@@ -229,9 +259,11 @@ class Idler extends EventEmitter {
   resetRuntime() {
     this.cookies = null;
     this.blocked = false;
-    this.current = [];
+    this.current = null;
     this.playing = [];
+    this.boosting = [];
     this.lastError = null;
+    this.refundDirty = true;
   }
 
   // 修改该账号的跳过列表、暂停状态或参数覆盖
@@ -252,6 +284,11 @@ class Idler extends EventEmitter {
       this.log.info(this.config.paused ? '已暂停挂卡' : '已恢复挂卡');
       if (this.config.paused) this.setPlaying([]);
     }
+    if (!prev.skipRefundable && this.config.skipRefundable) this.refundDirty = true;
+    if (this.games.length > 0) {
+      // 跳过列表、优先队列等变化立即反映到游戏列表，不必等徽章页重新读取
+      this.games = annotateGames(this.games, this.config, this.refundable);
+    }
     this.refreshState();
     this.scheduleCheck(1_000);
     return this.config;
@@ -268,20 +305,66 @@ class Idler extends EventEmitter {
     this.checkTimer = setTimeout(() => this.check(), delayMs);
   }
 
-  setPlaying(games) {
-    const ids = games.map((g) => g.appid);
-    const same = ids.length === this.current.length && ids.every((id, i) => id === this.current[i]);
+  /**
+   * 上报正在游戏。
+   * @param {object[]} games 挂卡的游戏
+   * @param {object} [opts]
+   * @param {object[]} [opts.boost] 没有可挂卡游戏时挂时长的游戏 { appid, name }
+   * @param {string} [opts.text] 自定义“正在游戏”文本
+   */
+  setPlaying(games, { boost = [], text = '' } = {}) {
+    const payload = playPayload(games.length ? games : boost, text);
+    const same = this.current !== null && JSON.stringify(payload) === JSON.stringify(this.current);
     this.playing = games;
+    this.boosting = games.length ? [] : boost;
     if (same) return;
-    this.current = ids;
-    if (this.client.steamID && !this.blocked) this.client.gamesPlayed(ids);
-    if (ids.length === 0) {
-      this.log.info('已停止挂卡');
-    } else {
+    const wasEmpty = !this.current || this.current.length === 0;
+    this.current = payload;
+    if (this.client.steamID && !this.blocked) this.client.gamesPlayed(payload);
+    if (games.length > 0) {
       const names = games.map((g) => `${g.name}(${g.appid}, ${g.hours}h, 剩${g.drops})`).join('、');
-      this.log.info(`开始挂 ${ids.length} 个游戏：${names}`);
+      this.log.info(`开始挂 ${games.length} 个游戏：${names}`);
+    } else if (boost.length > 0) {
+      this.log.info(`没有可挂卡的游戏，挂 ${boost.length} 个游戏累计时长：${boost.map((g) => g.appid).join('、')}`);
+    } else if (payload.length > 0) {
+      this.log.info(`没有可挂卡的游戏，显示自定义状态：${payload[0]}`);
+    } else if (!wasEmpty) {
+      this.log.info('已停止挂卡');
     }
     this.emitStatus();
+  }
+
+  // 没有可挂卡游戏时挂的游戏，名称通过 PICS 查询，查询失败时只显示 appid
+  boostGames() {
+    const ids = this.config.idleAppIds.slice(0, gameSlots(this.config.idleStatusText));
+    const missing = ids.filter((id) => !this.appNames.has(id));
+    if (missing.length > 0 && this.client.steamID && typeof this.client.getProductInfo === 'function') {
+      for (const id of missing) this.appNames.set(id, null);
+      withTimeout(this.client.getProductInfo(missing, [], true), PICS_TIMEOUT_MS, 'PICS 请求超时')
+        .then(({ apps }) => {
+          for (const id of missing) this.appNames.set(id, apps?.[id]?.appinfo?.common?.name || null);
+          this.boosting = this.boosting.map((g) => ({ ...g, name: this.appNames.get(g.appid) || g.name }));
+          this.emitStatus();
+        })
+        .catch(() => {});
+    }
+    return ids.map((appid) => ({ appid, name: this.appNames.get(appid) || `App ${appid}` }));
+  }
+
+  // 从许可证列表计算退款期内的游戏
+  async loadRefundable() {
+    const licenses = refundableLicenses(this.client.licenses);
+    if (licenses.length === 0) {
+      this.refundable = new Map();
+    } else {
+      const { packages } = await withTimeout(
+        this.client.getProductInfo([], licenses.map((l) => l.package_id), true),
+        PICS_TIMEOUT_MS,
+        'PICS 请求超时',
+      );
+      this.refundable = refundableApps(licenses, packages || {});
+    }
+    this.refundDirty = false;
   }
 
   async check() {
@@ -292,13 +375,22 @@ class Idler extends EventEmitter {
       this.recordDrops(all);
       this.lastCheckAt = new Date();
       this.nextCheckAt = new Date(Date.now() + this.config.checkIntervalMinutes * 60_000);
-      const skip = new Set(this.config.skipAppIds);
-      this.games = all.map((g) => ({ ...g, skipped: skip.has(g.appid) }));
-      const games = all.filter((g) => !skip.has(g.appid));
-      const totalDrops = games.reduce((s, g) => s + g.drops, 0);
-      this.log.info(`可掉卡游戏 ${games.length} 个，剩余 ${totalDrops} 张`);
+      if (this.config.skipRefundable && this.refundDirty) {
+        try {
+          await this.loadRefundable();
+        } catch (err) {
+          // 沿用上一次的结果，下次检查重试
+          this.log.warn(`读取游戏购买时间失败（${err.message}），本轮退款期判断可能不准确`);
+        }
+      }
+      this.games = annotateGames(all, this.config, this.refundable);
+      const active = this.games.filter((g) => !g.skipped);
+      const totalDrops = active.reduce((s, g) => s + g.drops, 0);
+      const refundSkipped = this.games.filter((g) => g.skipReason === 'refundable').length;
+      this.log.info(`可掉卡游戏 ${active.length} 个，剩余 ${totalDrops} 张${refundSkipped ? `（${refundSkipped} 个在退款期内，已跳过）` : ''}`);
+      this.checkFinished(totalDrops);
       if (this.blocked) return; // 拉取期间账号开始在别处游戏
-      this.setPlaying(this.config.paused ? [] : planIdle(games, this.config));
+      this.applyPlan();
     } catch (err) {
       if (err instanceof NotLoggedInError) {
         this.log.warn(`${err.message}，重新获取网页会话`);
@@ -317,6 +409,29 @@ class Idler extends EventEmitter {
     this.scheduleCheck(0);
   }
 
+  // 按当前游戏列表和配置决定挂什么
+  applyPlan() {
+    if (this.config.paused) return this.setPlaying([]);
+    const { farmingStatusText, idleStatusText } = this.config;
+    const maxConcurrent = Math.min(this.config.maxConcurrent, gameSlots(farmingStatusText));
+    const games = planIdle(this.games, { ...this.config, maxConcurrent });
+    if (games.length > 0) return this.setPlaying(games, { text: farmingStatusText });
+    this.setPlaying([], { boost: this.boostGames(), text: idleStatusText });
+  }
+
+  // 可挂的卡片从有到无时通知一次；重启后第一次检查只建立基准
+  checkFinished(totalDrops) {
+    if (this.prevActiveDrops > 0 && totalDrops === 0) {
+      const boost = this.config.idleAppIds.length ? `，开始挂 ${this.config.idleAppIds.length} 个游戏累计时长` : '';
+      this.notify('finished', '卡片已全部掉完', `可挂的卡片已全部掉完${boost}。`);
+    }
+    this.prevActiveDrops = totalDrops;
+  }
+
+  notify(event, title, text) {
+    this.emit('notify', { event, title, text });
+  }
+
   recordDrops(all) {
     const drops = detectDrops(this.prevDrops, all);
     this.prevDrops = new Map(all.map((g) => [g.appid, { name: g.name, drops: g.drops }]));
@@ -324,6 +439,8 @@ class Idler extends EventEmitter {
     const time = new Date().toISOString();
     this.dropHistory = store.appendDropHistory(this.id, drops.map((d) => ({ time, ...d })));
     for (const d of drops) this.log.info(`掉落 ${d.count} 张卡片：${d.name}`);
+    const count = drops.reduce((s, d) => s + d.count, 0);
+    this.notify('drops', `掉落 ${count} 张卡片`, drops.map((d) => `${d.name} +${d.count}`).join('\n'));
   }
 
   refreshState() {
@@ -351,6 +468,7 @@ class Idler extends EventEmitter {
       state: this.state,
       account: this.account,
       playing: this.playing,
+      boosting: this.boosting,
       games: this.games,
       totalDrops: this.games.filter((g) => !g.skipped).reduce((s, g) => s + g.drops, 0),
       lastCheckAt: this.lastCheckAt,

@@ -28,7 +28,21 @@ function parseTrustProxy(value) {
   return v;
 }
 
-const SETTING_KEYS = ['maxConcurrent', 'hoursUntilDrops', 'checkIntervalMinutes', 'personaState', 'machineName'];
+const SETTING_KEYS = [
+  'maxConcurrent',
+  'hoursUntilDrops',
+  'checkIntervalMinutes',
+  'personaState',
+  'machineName',
+  'farmingOrder',
+  'skipRefundable',
+  'skipUnplayed',
+  'farmingStatusText',
+  'idleStatusText',
+];
+
+// 账号自己的游戏列表与开关，不随全局默认值变化
+const ACCOUNT_KEYS = ['skipAppIds', 'priorityAppIds', 'priorityOnly', 'idleAppIds'];
 
 // 只取挂卡参数白名单字段
 function pickSettings(body) {
@@ -46,11 +60,12 @@ function badRequest(err) {
  * @param {import('./auth').Auth} deps.auth
  * @param {import('./accounts').AccountManager} deps.accounts
  * @param {import('./steam-login').LoginFlow} deps.loginFlow
+ * @param {import('./notify').Notifier} deps.notifier
  * @param {object} deps.log
  * @param {string} [deps.staticDir] 前端构建产物目录
  * @param {boolean|string} [deps.trustProxy] Fastify trustProxy 取值，只信任指定来源的 X-Forwarded-*
  */
-function buildServer({ auth, accounts, loginFlow, log, staticDir, trustProxy = false }) {
+function buildServer({ auth, accounts, loginFlow, notifier, log, staticDir, trustProxy = false }) {
   const app = Fastify({ logger: false, trustProxy, bodyLimit: 64 * 1024 });
   app.register(require('@fastify/cookie'));
 
@@ -153,11 +168,26 @@ function buildServer({ auth, accounts, loginFlow, log, staticDir, trustProxy = f
       }
     });
 
-    // 单个账号：跳过列表与参数覆盖（overrides 为 null 表示使用全局默认值）
+    // 通知渠道与订阅的事件；密钥不回传
+    api.get('/api/notify', async () => notifier.getConfig());
+
+    api.put('/api/notify', async (req) => {
+      try {
+        const config = notifier.saveConfig(req.body || {});
+        log.info('通知设置已更新');
+        return config;
+      } catch (err) {
+        throw badRequest(err);
+      }
+    });
+
+    api.post('/api/notify/test', async () => notifier.test());
+
+    // 单个账号：游戏列表与参数覆盖（overrides 为 null 表示使用全局默认值）
     api.put('/api/accounts/:id/config', async (req) => {
       const body = req.body || {};
       const patch = {};
-      if (body.skipAppIds !== undefined) patch.skipAppIds = body.skipAppIds;
+      for (const key of ACCOUNT_KEYS) if (body[key] !== undefined) patch[key] = body[key];
       if (body.overrides !== undefined) patch.overrides = body.overrides === null ? null : pickSettings(body.overrides);
       const idler = accounts.get(req.params.id);
       try {

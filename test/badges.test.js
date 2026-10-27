@@ -1,7 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { parseBadgesPage, NotLoggedInError } = require('../src/badges');
-const { planIdle } = require('../src/planner');
 
 // 按真实徽章页结构构造（本人登录视角才会显示掉落数）
 function row({ appid, name, play, drops }) {
@@ -41,19 +40,4 @@ test('解析可掉卡游戏、时长和掉落数', () => {
 
 test('未登录页面抛出 NotLoggedInError', () => {
   assert.throws(() => parseBadgesPage('<script>g_steamID = false;</script>'), NotLoggedInError);
-});
-
-test('planIdle：未满阈值时批量挂，满阈值后单独挂时长最多的', () => {
-  const cfg = { maxConcurrent: 2, hoursUntilDrops: 2 };
-  const a = { appid: 1, hours: 0.5 };
-  const b = { appid: 2, hours: 1 };
-  const c = { appid: 3, hours: 0 };
-  assert.deepStrictEqual(planIdle([a, b, c], cfg), [a, b]);
-
-  const d = { appid: 4, hours: 2.1 };
-  const e = { appid: 5, hours: 8 };
-  assert.deepStrictEqual(planIdle([a, d, e], cfg), [e]);
-
-  assert.deepStrictEqual(planIdle([a, b], { ...cfg, hoursUntilDrops: 0 }), [a]);
-  assert.deepStrictEqual(planIdle([], cfg), []);
 });

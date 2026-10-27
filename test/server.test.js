@@ -68,8 +68,22 @@ function makeApp({ trustProxy = false } = {}) {
     status: () => ({ state: 'idle' }),
     cancel() {},
   });
-  const app = buildServer({ auth, accounts, loginFlow, log: quietLog, trustProxy });
-  return { app, auth, accounts };
+  const notifier = {
+    config: { webhook: { enabled: false, url: '', urlSet: false } },
+    getConfig() {
+      return this.config;
+    },
+    saveConfig(patch) {
+      if (patch.webhook?.url === 'bad') throw new Error('Webhook 地址 不是有效的网址');
+      this.config = { webhook: { ...this.config.webhook, ...patch.webhook, url: '', urlSet: true } };
+      return this.config;
+    },
+    async test() {
+      return [{ channel: 'webhook', ok: true }];
+    },
+  };
+  const app = buildServer({ auth, accounts, loginFlow, notifier, log: quietLog, trustProxy });
+  return { app, auth, accounts, notifier };
 }
 
 const json = (method, url, payload, headers = {}) => ({
@@ -205,9 +219,19 @@ test('账号接口：配置白名单、覆盖可清空、未知账号 404、批�
   const { app, auth, accounts } = makeApp();
   const cookie = cookieOf(await app.inject(json('POST', '/api/auth/setup', { code: auth.ensureSetupCode(), password: 'password123' })));
 
-  const ok = await app.inject(json('PUT', `/api/accounts/${A}/config`, { skipAppIds: [570], overrides: { maxConcurrent: 3, evil: 1 }, paused: true }, { cookie }));
+  const ok = await app.inject(
+    json(
+      'PUT',
+      `/api/accounts/${A}/config`,
+      { skipAppIds: [570], priorityAppIds: [730], priorityOnly: true, idleAppIds: [440], overrides: { maxConcurrent: 3, farmingOrder: 'name', evil: 1 }, paused: true },
+      { cookie },
+    ),
+  );
   assert.strictEqual(ok.statusCode, 200);
-  assert.deepStrictEqual(accounts.calls.at(-1), ['account', { skipAppIds: [570], overrides: { maxConcurrent: 3 } }]);
+  assert.deepStrictEqual(accounts.calls.at(-1), [
+    'account',
+    { skipAppIds: [570], priorityAppIds: [730], priorityOnly: true, idleAppIds: [440], overrides: { maxConcurrent: 3, farmingOrder: 'name' } },
+  ]);
 
   await app.inject(json('PUT', `/api/accounts/${A}/config`, { overrides: null }, { cookie }));
   assert.deepStrictEqual(accounts.calls.at(-1), ['account', { overrides: null }]);
@@ -251,4 +275,18 @@ test('未知接口返回 404 JSON', async () => {
   const { app } = makeApp();
   const res = await app.inject({ method: 'GET', url: '/api/nope' });
   assert.strictEqual(res.statusCode, 404);
+});
+
+test('通知接口：读取、保存、校验失败返回 400、发送测试', async () => {
+  const { app, auth } = makeApp();
+  assert.strictEqual((await app.inject({ method: 'GET', url: '/api/notify' })).statusCode, 401);
+  const cookie = cookieOf(await app.inject(json('POST', '/api/auth/setup', { code: auth.ensureSetupCode(), password: 'password123' })));
+
+  assert.strictEqual((await app.inject({ method: 'GET', url: '/api/notify', headers: { cookie } })).json().webhook.urlSet, false);
+  const saved = await app.inject(json('PUT', '/api/notify', { webhook: { enabled: true, url: 'https://x.test' } }, { cookie }));
+  assert.deepStrictEqual(saved.json().webhook, { enabled: true, url: '', urlSet: true });
+  const bad = await app.inject(json('PUT', '/api/notify', { webhook: { url: 'bad' } }, { cookie }));
+  assert.strictEqual(bad.statusCode, 400);
+  const sent = await app.inject(json('POST', '/api/notify/test', {}, { cookie }));
+  assert.deepStrictEqual(sent.json(), [{ channel: 'webhook', ok: true }]);
 });

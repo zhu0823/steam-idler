@@ -23,10 +23,27 @@ test('没有配置文件时使用默认值', () => {
 });
 
 test('全局参数保存时校验并限制取值范围', () => {
-  const c = store.saveGlobalConfig({ maxConcurrent: 100, checkIntervalMinutes: 1, hoursUntilDrops: -3, personaState: 'INVISIBLE', machineName: '  ' });
-  assert.deepStrictEqual(c, { maxConcurrent: 32, hoursUntilDrops: 0, checkIntervalMinutes: 5, personaState: 'invisible', machineName: 'steam-idler' });
+  const c = store.saveGlobalConfig({
+    maxConcurrent: 100,
+    checkIntervalMinutes: 1,
+    hoursUntilDrops: -3,
+    personaState: 'INVISIBLE',
+    machineName: '  ',
+    skipUnplayed: 1,
+    farmingStatusText: `  挂卡中\n${'x'.repeat(100)}`,
+  });
+  assert.deepStrictEqual(c, {
+    ...store.DEFAULT_SETTINGS,
+    maxConcurrent: 32,
+    hoursUntilDrops: 0,
+    checkIntervalMinutes: 5,
+    personaState: 'invisible',
+    skipUnplayed: true,
+    farmingStatusText: `挂卡中 ${'x'.repeat(60)}`,
+  });
   assert.deepStrictEqual(store.loadGlobalConfig(), c);
   assert.throws(() => store.saveGlobalConfig({ personaState: 'busy' }), /personaState/);
+  assert.throws(() => store.saveGlobalConfig({ farmingOrder: 'random' }), /farmingOrder/);
   assert.deepStrictEqual(store.loadGlobalConfig(), c);
 });
 
@@ -77,6 +94,43 @@ test('生效配置：默认使用全局值，开启覆盖后使用账号值，�
   assert.throws(() => store.saveAccountConfig(A, { overrides: [1] }), /overrides/);
 });
 
+test('账号的优先队列保持顺序，掉完后挂的游戏最多 32 个', () => {
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  store.saveAccountConfig(A, { priorityAppIds: [730, '570', 730], priorityOnly: 'yes', idleAppIds: [440] });
+  const c = store.effectiveConfig(A);
+  assert.deepStrictEqual(c.priorityAppIds, [730, 570]);
+  assert.strictEqual(c.priorityOnly, true);
+  assert.deepStrictEqual(c.idleAppIds, [440]);
+  assert.ok(!('overrides' in c));
+  const many = Array.from({ length: 33 }, (_, i) => i + 1);
+  assert.throws(() => store.saveAccountConfig(A, { idleAppIds: many }), /最多 32/);
+});
+
+test('通知配置：密钥不回传，留空保持原值，null 清空', () => {
+  assert.deepStrictEqual(store.loadNotifyConfig().events, { drops: false, finished: true, authFailed: true });
+  store.saveNotifyConfig({ telegram: { enabled: true, botToken: '123:abc', chatId: '42' }, events: { drops: true } });
+  let c = store.saveNotifyConfig({ telegram: { enabled: true, botToken: '', chatId: '43' } });
+  assert.strictEqual(c.telegram.botToken, '123:abc');
+  assert.strictEqual(c.telegram.chatId, '43');
+  assert.strictEqual(c.events.drops, true);
+  assert.strictEqual(c.events.finished, true);
+
+  const masked = store.maskNotifyConfig(c);
+  assert.strictEqual(masked.telegram.botToken, '');
+  assert.strictEqual(masked.telegram.botTokenSet, true);
+  assert.strictEqual(masked.bark.urlSet, false);
+  assert.strictEqual(c.telegram.botToken, '123:abc');
+
+  assert.throws(() => store.saveNotifyConfig({ telegram: { botToken: null } }), /Bot Token 和 Chat ID/);
+  c = store.saveNotifyConfig({ telegram: { enabled: false, botToken: null } });
+  assert.strictEqual(c.telegram.botToken, '');
+  assert.throws(() => store.saveNotifyConfig({ bark: { enabled: true, url: 'ftp://x' } }), /http/);
+  assert.throws(() => store.saveNotifyConfig({ webhook: { enabled: true } }), /Webhook/);
+  assert.strictEqual(store.saveNotifyConfig({ bark: { enabled: true, url: 'https://api.day.app/KEY/' } }).bark.url, 'https://api.day.app/KEY');
+  const file = store.files.notify;
+  assert.strictEqual((fs.statSync(file).mode & 0o777).toString(8), '600');
+});
+
 test('旧版单账号数据迁移到 accounts/<SteamID>', () => {
   fs.writeFileSync(store.files.legacyToken, JSON.stringify({ accountName: 'alice', steamID: A, refreshToken: 'legacy' }));
   fs.writeFileSync(store.files.config, JSON.stringify({ maxConcurrent: 8, skipAppIds: [570], paused: true, personaState: 'invisible' }));
@@ -84,9 +138,9 @@ test('旧版单账号数据迁移到 accounts/<SteamID>', () => {
   assert.strictEqual(store.migrateLegacy(), A);
   assert.ok(!fs.existsSync(store.files.legacyToken));
   assert.strictEqual(store.loadAccountToken(A).refreshToken, 'legacy');
-  assert.deepStrictEqual(store.loadAccountConfig(A), { skipAppIds: [570], paused: true, overrides: null });
+  assert.deepStrictEqual(store.loadAccountConfig(A), { ...store.DEFAULT_ACCOUNT_CONFIG, skipAppIds: [570], paused: true });
   const global = JSON.parse(fs.readFileSync(store.files.config, 'utf8'));
-  assert.deepStrictEqual(global, { maxConcurrent: 8, hoursUntilDrops: 2, checkIntervalMinutes: 15, personaState: 'invisible', machineName: 'steam-idler' });
+  assert.deepStrictEqual(global, { ...store.DEFAULT_SETTINGS, maxConcurrent: 8, personaState: 'invisible' });
 
   // 再次启动不会重复迁移
   assert.strictEqual(store.migrateLegacy(), null);
@@ -111,7 +165,7 @@ test('配置文件损坏时备份并使用默认值，个别字段非法时只�
 
   store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
   fs.writeFileSync(path.join(store.files.accounts, A, 'config.json'), JSON.stringify({ skipAppIds: 'x', paused: true }));
-  assert.deepStrictEqual(store.loadAccountConfig(A), { skipAppIds: [], paused: true, overrides: null });
+  assert.deepStrictEqual(store.loadAccountConfig(A), { ...store.DEFAULT_ACCOUNT_CONFIG, paused: true });
 
   fs.writeFileSync(path.join(store.files.accounts, A, 'token.json'), 'not json');
   assert.strictEqual(store.loadAccountToken(A), null);

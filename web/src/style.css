@@ -1249,6 +1249,108 @@ code {
   cursor: pointer;
 }
 
+.star-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.star-toggle:hover:not(:disabled) {
+  background: var(--raised);
+  color: var(--text-2);
+}
+
+.star-toggle.on,
+.star-toggle.on:hover:not(:disabled) {
+  color: var(--drop);
+}
+
+.star-toggle:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.star-toggle .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.game-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: -6px;
+}
+
+.queue {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 12px;
+  min-width: 0;
+}
+
+.queue-item + .queue-item {
+  border-top: 1px solid var(--border);
+}
+
+.queue-item .rank {
+  width: 22px;
+  color: var(--muted);
+  font-size: 12px;
+  flex: none;
+}
+
+.queue-item .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-item .star-toggle {
+  color: var(--muted);
+}
+
+.channel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+}
+
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+}
+
+.checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from 'vue';
-import { api } from '../api';
+import { api, fmtDate } from '../api';
 import DropPips from './DropPips.vue';
 import Icon from './Icon.vue';
 
@@ -13,30 +13,32 @@ const error = ref('');
 
 const threshold = computed(() => props.account.config.hoursUntilDrops);
 const playingIds = computed(() => new Set(props.account.playing.map((g) => g.appid)));
+const manualSkip = computed(() => new Set(props.account.config.skipAppIds));
 
 function statusOf(g) {
   if (g.skipped) return 'skipped';
-  return playingIds.value.has(g.appid) ? 'playing' : 'queued';
+  if (playingIds.value.has(g.appid)) return 'playing';
+  if (props.account.config.priorityOnly && !g.priority) return 'waiting';
+  return 'queued';
 }
 
 const rows = computed(() => {
   const q = query.value.trim().toLowerCase();
-  const rank = { playing: 0, queued: 1, skipped: 2 };
+  const rank = { playing: 0, queued: 1, waiting: 2, skipped: 3 };
   return props.account.games
     .filter((g) => !q || g.name.toLowerCase().includes(q) || String(g.appid).includes(q))
-    .filter((g) => filter.value === 'all' || statusOf(g) === filter.value)
-    .sort((a, b) => rank[statusOf(a)] - rank[statusOf(b)] || b.hours - a.hours);
+    .filter((g) => filter.value === 'all' || (filter.value === 'priority' ? g.priority : statusOf(g) === filter.value))
+    .sort(
+      (a, b) =>
+        rank[statusOf(a)] - rank[statusOf(b)] || (a.priority || Infinity) - (b.priority || Infinity) || b.hours - a.hours,
+    );
 });
 
-// 勾选“跳过”立即保存（保留配置中不在当前列表里的 AppID）
-async function toggleSkip(g, skip) {
+async function saveList(g, patch) {
   error.value = '';
-  const current = new Set(props.account.config.skipAppIds);
-  if (skip) current.add(g.appid);
-  else current.delete(g.appid);
   saving.value = new Set([...saving.value, g.appid]);
   try {
-    await api('PUT', `/api/accounts/${props.account.id}/config`, { skipAppIds: [...current] });
+    await api('PUT', `/api/accounts/${props.account.id}/config`, patch);
   } catch (err) {
     error.value = err.message;
   } finally {
@@ -44,6 +46,20 @@ async function toggleSkip(g, skip) {
     next.delete(g.appid);
     saving.value = next;
   }
+}
+
+// 勾选“跳过”立即保存（保留配置中不在当前列表里的 AppID）
+function toggleSkip(g, skip) {
+  const current = new Set(props.account.config.skipAppIds);
+  if (skip) current.add(g.appid);
+  else current.delete(g.appid);
+  return saveList(g, { skipAppIds: [...current] });
+}
+
+// 星标加入或移出优先队列，新加入的排在队尾
+function togglePriority(g) {
+  const list = props.account.config.priorityAppIds;
+  return saveList(g, { priorityAppIds: g.priority ? list.filter((id) => id !== g.appid) : [...list, g.appid] });
 }
 </script>
 
@@ -59,6 +75,7 @@ async function toggleSkip(g, skip) {
         <option value="all">全部状态</option>
         <option value="playing">挂卡中</option>
         <option value="queued">排队</option>
+        <option value="priority">优先队列</option>
         <option value="skipped">已跳过</option>
       </select>
     </div>
@@ -77,8 +94,22 @@ async function toggleSkip(g, skip) {
         <tbody>
           <tr v-for="g in rows" :key="g.appid">
             <td>
-              <div class="game-name">{{ g.name }}</div>
-              <div class="game-id mono">{{ g.appid }}</div>
+              <div class="game-cell">
+                <button
+                  class="star-toggle"
+                  :class="{ on: g.priority }"
+                  :disabled="saving.has(g.appid)"
+                  :title="g.priority ? `优先队列第 ${g.priority} 位，点击移出` : '加入优先队列'"
+                  :aria-label="g.priority ? '移出优先队列' : '加入优先队列'"
+                  @click="togglePriority(g)"
+                >
+                  <Icon :name="g.priority ? 'starFill' : 'star'" />
+                </button>
+                <div>
+                  <div class="game-name">{{ g.name }}</div>
+                  <div class="game-id mono">{{ g.appid }}</div>
+                </div>
+              </div>
             </td>
             <td class="hide-sm">
               <div class="hours">
@@ -91,16 +122,22 @@ async function toggleSkip(g, skip) {
             <td class="num"><DropPips :count="g.drops" /><span class="drop-text" style="margin-left: 8px">{{ g.drops }}</span></td>
             <td>
               <span v-if="statusOf(g) === 'playing'" class="chip ok">挂卡中</span>
+              <span v-else-if="g.skipReason === 'refundable'" class="chip warn" :title="`退款截止 ${fmtDate(g.refundableUntil)}，之后自动开始挂卡`">
+                退款期至 {{ fmtDate(g.refundableUntil) }}
+              </span>
+              <span v-else-if="g.skipReason === 'unplayed'" class="chip plain">未玩过</span>
               <span v-else-if="statusOf(g) === 'skipped'" class="chip plain">已跳过</span>
+              <span v-else-if="statusOf(g) === 'waiting'" class="chip plain" title="已开启只挂优先队列">不在队列</span>
+              <span v-else-if="g.priority" class="chip accent">优先 #{{ g.priority }}</span>
               <span v-else class="chip plain">排队</span>
             </td>
             <td class="r">
               <input
                 type="checkbox"
                 class="skip-toggle"
-                :checked="g.skipped"
+                :checked="manualSkip.has(g.appid)"
                 :disabled="saving.has(g.appid)"
-                :title="g.skipped ? '取消跳过' : '跳过该游戏'"
+                :title="manualSkip.has(g.appid) ? '取消跳过' : '跳过该游戏'"
                 @change="toggleSkip(g, $event.target.checked)"
               />
             </td>
@@ -109,7 +146,7 @@ async function toggleSkip(g, skip) {
       </table>
     </div>
     <div class="card-pad small muted" style="border-top: 1px solid var(--border)">
-      显示 {{ rows.length }} / {{ account.games.length }} 个游戏 · 勾选“跳过”后立即生效
+      显示 {{ rows.length }} / {{ account.games.length }} 个游戏 · 星标加入优先队列、勾选“跳过”后立即生效
     </div>
   </template>
 </template>

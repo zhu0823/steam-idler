@@ -43,6 +43,11 @@ class FakeClient extends EventEmitter {
   }
 
   webLogOn() {}
+
+  async getProductInfo(apps, packages) {
+    this.calls.push(['getProductInfo', apps, packages]);
+    return this.productInfo || { apps: {}, packages: {} };
+  }
 }
 
 function makeManagerWith(idlerOptions = {}) {
@@ -190,4 +195,122 @@ test('检查徽章页时识别掉卡并持久化，状态包含阶段与预计�
   again.start();
   assert.strictEqual(again.get(A).status().dropsToday, 3);
   await again.shutdown();
+});
+
+function loggedIn(manager, clients, id = A) {
+  const idler = manager.get(id);
+  clients.get(id).steamID = { getSteamID64: () => id };
+  idler.cookies = ['sessionid=x'];
+  return idler;
+}
+
+const played = (client) => client.calls.filter((c) => c[0] === 'gamesPlayed').map((c) => c[1]);
+
+test('退款期内的游戏不挂，许可证变化后重新计算', async () => {
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  const games = [{ appid: 10, name: 'New', hours: 0, drops: 3 }, { appid: 20, name: 'Old', hours: 0.5, drops: 2 }];
+  const { manager, clients } = makeManagerWith({ fetchBadges: async () => games, badgeGapMs: 0 });
+  manager.start();
+  const idler = loggedIn(manager, clients);
+  const client = clients.get(A);
+  const now = Math.floor(Date.now() / 1000);
+  client.licenses = [
+    { package_id: 1, time_created: now - 86400, payment_method: 2, flags: 0 },
+    { package_id: 2, time_created: now - 100 * 86400, payment_method: 2, flags: 0 },
+  ];
+  client.productInfo = { apps: {}, packages: { 1: { packageinfo: { appids: { 0: 10 } } } } };
+
+  await idler.check();
+  assert.deepStrictEqual(client.calls.find((c) => c[0] === 'getProductInfo'), ['getProductInfo', [], [1]]);
+  let s = idler.status();
+  assert.deepStrictEqual(s.games.map((g) => g.skipReason), ['refundable', null]);
+  assert.deepStrictEqual(s.playing.map((g) => g.appid), [20]);
+  assert.strictEqual(s.totalDrops, 2);
+
+  // 只在许可证变化后重新查询
+  await idler.check();
+  assert.strictEqual(client.calls.filter((c) => c[0] === 'getProductInfo').length, 1);
+
+  // 关闭保护后照常挂
+  manager.setGlobalConfig({ skipRefundable: false });
+  await idler.check();
+  s = idler.status();
+  assert.deepStrictEqual(s.playing.map((g) => g.appid).sort(), [10, 20]);
+  await manager.shutdown();
+});
+
+test('优先队列与跳过修改后立即反映到游戏列表', async () => {
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  const games = [{ appid: 10, name: 'A', hours: 3, drops: 3 }, { appid: 20, name: 'B', hours: 2.5, drops: 2 }];
+  const { manager, clients } = makeManagerWith({ fetchBadges: async () => games, badgeGapMs: 0 });
+  manager.start();
+  const idler = loggedIn(manager, clients);
+  await idler.check();
+  assert.deepStrictEqual(idler.status().playing.map((g) => g.appid), [10]);
+
+  manager.setAccountConfig(A, { priorityAppIds: [20] });
+  assert.deepStrictEqual(idler.status().games.map((g) => g.priority), [null, 1]);
+  await idler.check();
+  assert.deepStrictEqual(idler.status().playing.map((g) => g.appid), [20]);
+  await manager.shutdown();
+});
+
+test('卡片掉完后挂指定游戏并显示自定义状态，挂卡时文本带游戏名', async () => {
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  const results = [[{ appid: 10, name: 'Hades', hours: 3, drops: 1 }], []];
+  const { manager, clients } = makeManagerWith({ fetchBadges: async () => results.shift(), badgeGapMs: 0 });
+  manager.start();
+  manager.setGlobalConfig({ farmingStatusText: '挂卡：{name}', idleStatusText: '休息中' });
+  manager.setAccountConfig(A, { idleAppIds: [440, 570] });
+  const idler = loggedIn(manager, clients);
+  const client = clients.get(A);
+  client.productInfo = { apps: { 440: { appinfo: { common: { name: 'Team Fortress 2' } } } }, packages: {} };
+
+  await idler.check();
+  assert.deepStrictEqual(played(client).at(-1), ['挂卡：Hades', 10]);
+  await idler.check();
+  assert.deepStrictEqual(played(client).at(-1), ['休息中', 440, 570]);
+  await new Promise(setImmediate);
+  const s = idler.status();
+  assert.deepStrictEqual(s.playing, []);
+  assert.deepStrictEqual(s.boosting, [{ appid: 440, name: 'Team Fortress 2' }, { appid: 570, name: 'App 570' }]);
+
+  // 暂停时什么都不挂
+  manager.setAccountConfig(A, { paused: true });
+  assert.deepStrictEqual(played(client).at(-1), []);
+  assert.deepStrictEqual(idler.status().boosting, []);
+  await manager.shutdown();
+});
+
+test('掉卡、全部掉完、凭据失效时发出通知', async () => {
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  const results = [
+    [{ appid: 10, name: 'Hades', hours: 3, drops: 2 }],
+    [{ appid: 10, name: 'Hades', hours: 3.5, drops: 1 }],
+    [],
+    [],
+  ];
+  const sent = [];
+  const notifier = { send: (msg) => sent.push(msg) };
+  const { manager, clients } = makeManagerWith({ fetchBadges: async () => results.shift(), badgeGapMs: 0 });
+  manager.notifier = notifier;
+  manager.start();
+  const idler = loggedIn(manager, clients);
+
+  for (let i = 0; i < 4; i++) await idler.check();
+  assert.deepStrictEqual(
+    sent.map((m) => [m.event, m.title, m.account.name]),
+    [
+      ['drops', '掉落 1 张卡片', 'alice'],
+      ['drops', '掉落 1 张卡片', 'alice'],
+      ['finished', '卡片已全部掉完', 'alice'],
+    ],
+  );
+  assert.strictEqual(sent[0].text, 'Hades +1');
+
+  const SteamUser = require('steam-user');
+  clients.get(A).emit('error', Object.assign(new Error('AccessDenied'), { eresult: SteamUser.EResult.AccessDenied }));
+  assert.strictEqual(sent.at(-1).event, 'authFailed');
+  assert.strictEqual(idler.status().state, 'auth_failed');
+  await manager.shutdown();
 });

@@ -13,6 +13,8 @@ const progress = computed(() => {
   return p.mode === 'multi' && p.threshold > 0 ? Math.min(p.maxHours / p.threshold, 1) * 100 : 0;
 });
 const toSolo = computed(() => fmtDuration(phase.value.minutesToSolo).join(' '));
+const boosting = computed(() => props.account.boosting || []);
+const refundWaiting = computed(() => props.account.games.filter((g) => g.skipReason === 'refundable').length);
 </script>
 
 <template>
@@ -43,12 +45,22 @@ const toSolo = computed(() => fmtDuration(phase.value.minutesToSolo).join(' '));
     <div class="row small muted"><DropPips :count="phase.game.drops" /> 还能掉 {{ phase.game.drops }} 张</div>
   </div>
 
+  <div v-else-if="boosting.length" class="phase">
+    <div class="phase-top">
+      <b>卡片已掉完 · 挂 {{ boosting.length }} 个游戏累计时长</b>
+    </div>
+    <span class="phase-note">{{ boosting.map((g) => g.name).join('、') }}</span>
+  </div>
+
   <div v-else class="phase">
     <div class="phase-top">
       <b>{{ account.config.paused ? '已暂停' : account.lastCheckAt ? '暂无可挂的游戏' : '等待读取徽章页' }}</b>
     </div>
     <span class="phase-note">
-      {{ account.config.paused ? '恢复后会立即重新检查' : account.lastCheckAt ? '程序会继续定期检查，有新的可掉卡游戏时自动开始' : '登录完成后会自动读取' }}
+      <template v-if="account.config.paused">恢复后会立即重新检查</template>
+      <template v-else-if="!account.lastCheckAt">登录完成后会自动读取</template>
+      <template v-else-if="refundWaiting">{{ refundWaiting }} 个游戏在退款期内，过了退款期后自动开始挂卡</template>
+      <template v-else>程序会继续定期检查，有新的可掉卡游戏时自动开始</template>
     </span>
   </div>
 </template>
