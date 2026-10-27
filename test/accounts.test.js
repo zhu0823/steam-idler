@@ -45,7 +45,7 @@ class FakeClient extends EventEmitter {
   webLogOn() {}
 }
 
-function makeManager() {
+function makeManagerWith(idlerOptions = {}) {
   const clients = new Map();
   const manager = new AccountManager({
     createClient: (id) => {
@@ -53,9 +53,12 @@ function makeManager() {
       clients.set(id, c);
       return c;
     },
+    idlerOptions,
   });
   return { manager, clients };
 }
+
+const makeManager = () => makeManagerWith();
 
 test.beforeEach(() => {
   fs.rmSync(store.dataDir, { recursive: true, force: true });
@@ -151,4 +154,40 @@ test('日志按账号标注', async () => {
   assert.strictEqual(entry.accountName, 'alice');
   assert.match(entry.message, /正在登录/);
   await manager.shutdown();
+});
+
+test('检查徽章页时识别掉卡并持久化，状态包含阶段与预计时间', async () => {
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  const results = [
+    [{ appid: 10, name: 'Hades', hours: 2.5, drops: 3 }, { appid: 20, name: 'Celeste', hours: 0.5, drops: 4 }],
+    [{ appid: 10, name: 'Hades', hours: 3, drops: 1 }, { appid: 20, name: 'Celeste', hours: 0.5, drops: 4 }],
+    [{ appid: 20, name: 'Celeste', hours: 0.5, drops: 4 }],
+  ];
+  const { manager, clients } = makeManagerWith({ fetchBadges: async () => results.shift(), badgeGapMs: 0 });
+  manager.start();
+  const idler = manager.get(A);
+  clients.get(A).steamID = { getSteamID64: () => A };
+  idler.cookies = ['sessionid=x'];
+
+  await idler.check();
+  let s = idler.status();
+  assert.strictEqual(s.dropsToday, 0);
+  assert.strictEqual(s.phase.mode, 'solo');
+  assert.strictEqual(s.phase.game.appid, 10);
+  assert.ok(s.etaMinutes > 0);
+
+  await idler.check();
+  await idler.check();
+  s = idler.status();
+  assert.strictEqual(s.dropsToday, 3);
+  assert.deepStrictEqual(s.recentDrops.map((d) => [d.name, d.count]), [['Hades', 1], ['Hades', 2]]);
+  assert.strictEqual(s.phase.mode, 'multi');
+  assert.strictEqual(store.loadDropHistory(A).length, 2);
+
+  // 重启后掉卡记录仍在
+  await manager.shutdown();
+  const again = makeManager().manager;
+  again.start();
+  assert.strictEqual(again.get(A).status().dropsToday, 3);
+  await again.shutdown();
 });

@@ -5,6 +5,7 @@ const store = require('./store');
 const log = require('./log');
 const { fetchAllDroppable, NotLoggedInError } = require('./badges');
 const { planIdle } = require('./planner');
+const { detectDrops, phaseOf, estimateMinutes, dropsOnDay } = require('./progress');
 
 const { EResult, EPersonaState } = SteamUser;
 
@@ -17,9 +18,9 @@ const AUTH_ERRORS = new Set([
 // 多个账号的徽章页请求串行执行并留出间隔，避免同一 IP 短时间内请求过多
 const BADGE_GAP_MS = 3_000;
 let badgeQueue = Promise.resolve();
-function enqueueBadgeFetch(fn) {
+function enqueueBadgeFetch(fn, gapMs) {
   const run = badgeQueue.then(fn);
-  badgeQueue = run.catch(() => {}).then(() => new Promise((r) => setTimeout(r, BADGE_GAP_MS).unref()));
+  badgeQueue = run.catch(() => {}).then(() => new Promise((r) => setTimeout(r, gapMs).unref()));
   return run;
 }
 
@@ -45,8 +46,10 @@ class Idler extends EventEmitter {
    * @param {object} opts
    * @param {string} opts.id 账号 SteamID64
    * @param {object} [opts.client] 用于测试注入的 SteamUser 实例
+   * @param {Function} [opts.fetchBadges] 用于测试注入的徽章页读取函数
+   * @param {number} [opts.badgeGapMs] 徽章页请求之间的间隔
    */
-  constructor({ id, client }) {
+  constructor({ id, client, fetchBadges = fetchAllDroppable, badgeGapMs = BADGE_GAP_MS }) {
     super();
     this.id = String(id);
     // 日志标签，登录后用账号名替换
@@ -63,6 +66,11 @@ class Idler extends EventEmitter {
     this.playing = [];
     this.games = []; // 最近一次读取的可掉卡游戏（含已跳过）
     this.lastCheckAt = null;
+    this.fetchBadges = fetchBadges;
+    this.badgeGapMs = badgeGapMs;
+    // 上一次读取的各游戏剩余掉落，用于识别掉卡；重启后第一次检查只建立基准
+    this.prevDrops = null;
+    this.dropHistory = store.loadDropHistory(this.id);
     this.lastError = null;
     this.checkTimer = null;
     this.retryTimer = null;
@@ -280,7 +288,8 @@ class Idler extends EventEmitter {
     if (this.checking || this.blocked || !this.client.steamID || !this.cookies) return;
     this.checking = true;
     try {
-      const all = await enqueueBadgeFetch(() => fetchAllDroppable(this.id, this.cookies));
+      const all = await enqueueBadgeFetch(() => this.fetchBadges(this.id, this.cookies), this.badgeGapMs);
+      this.recordDrops(all);
       this.lastCheckAt = new Date();
       this.nextCheckAt = new Date(Date.now() + this.config.checkIntervalMinutes * 60_000);
       const skip = new Set(this.config.skipAppIds);
@@ -306,6 +315,15 @@ class Idler extends EventEmitter {
 
   checkNow() {
     this.scheduleCheck(0);
+  }
+
+  recordDrops(all) {
+    const drops = detectDrops(this.prevDrops, all);
+    this.prevDrops = new Map(all.map((g) => [g.appid, { name: g.name, drops: g.drops }]));
+    if (drops.length === 0) return;
+    const time = new Date().toISOString();
+    this.dropHistory = store.appendDropHistory(this.id, drops.map((d) => ({ time, ...d })));
+    for (const d of drops) this.log.info(`掉落 ${d.count} 张卡片：${d.name}`);
   }
 
   refreshState() {
@@ -339,6 +357,10 @@ class Idler extends EventEmitter {
       nextCheckAt: this.client.steamID ? this.nextCheckAt : null,
       lastError: this.lastError,
       config: this.config,
+      phase: phaseOf(this.playing, this.config.hoursUntilDrops),
+      etaMinutes: this.lastCheckAt ? estimateMinutes(this.games, this.config.hoursUntilDrops) : null,
+      dropsToday: dropsOnDay(this.dropHistory),
+      recentDrops: this.dropHistory.slice(-10).reverse(),
     };
   }
 

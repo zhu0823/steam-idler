@@ -1,15 +1,25 @@
 <script setup>
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { api, connectEvents, disconnectEvents, live } from './api';
+import { currentTheme, openAccount, openPage, toggleTheme, ui } from './ui';
+import Icon from './components/Icon.vue';
+import AppSidebar from './components/AppSidebar.vue';
+import AddAccountModal from './components/AddAccountModal.vue';
 import SetupView from './views/SetupView.vue';
 import LoginView from './views/LoginView.vue';
-import DashboardView from './views/DashboardView.vue';
+import OverviewView from './views/OverviewView.vue';
+import AccountView from './views/AccountView.vue';
 import SettingsView from './views/SettingsView.vue';
 
 // loading | setup | login | app
 const view = ref('loading');
-const tab = ref('dashboard');
 const error = ref('');
+const theme = ref(currentTheme());
+
+const accounts = computed(() => live.status?.accounts || []);
+// 账号被移除后回到概览
+const selected = computed(() => accounts.value.find((a) => a.id === ui.accountId) || null);
+const page = computed(() => (ui.page === 'account' && !selected.value ? 'overview' : ui.page));
 
 async function refreshAuth() {
   try {
@@ -34,32 +44,67 @@ async function logoutPanel() {
   view.value = 'login';
 }
 
+function onToggleTheme() {
+  theme.value = toggleTheme();
+}
+
+// 手机底部导航的“账号”：打开当前或第一个账号
+function openAccountsTab() {
+  const id = selected.value?.id || accounts.value[0]?.id;
+  if (id) openAccount(id);
+  else openPage('overview');
+}
+
 onMounted(refreshAuth);
 </script>
 
 <template>
-  <div class="shell">
-    <header class="topbar">
-      <div class="brand">Steam Idler</div>
-      <nav v-if="view === 'app'" class="tabs">
-        <button :class="{ active: tab === 'dashboard' }" @click="tab = 'dashboard'">概览</button>
-        <button :class="{ active: tab === 'settings' }" @click="tab = 'settings'">设置</button>
-      </nav>
-      <div v-if="view === 'app'" class="topbar-right">
-        <span class="dot" :class="live.connected ? 'ok' : 'off'" :title="live.connected ? '实时连接正常' : '实时连接已断开，正在重连'"></span>
-        <button class="link" @click="logoutPanel">退出面板</button>
+  <div class="app">
+    <div v-if="error" class="auth-wrap">
+      <div class="card auth-card">
+        <p class="callout err"><Icon name="alert" />{{ error }}</p>
+        <button class="btn" @click="refreshAuth">重试</button>
       </div>
-    </header>
+    </div>
+    <div v-else-if="view === 'loading'" class="auth-wrap muted">加载中…</div>
+    <SetupView v-else-if="view === 'setup'" @done="enterApp" />
+    <LoginView v-else-if="view === 'login'" @done="enterApp" />
 
-    <main class="content">
-      <p v-if="error" class="alert error">{{ error }}</p>
-      <p v-else-if="view === 'loading'" class="muted">加载中…</p>
-      <SetupView v-else-if="view === 'setup'" @done="enterApp" />
-      <LoginView v-else-if="view === 'login'" @done="enterApp" />
-      <template v-else>
-        <DashboardView v-if="tab === 'dashboard'" />
-        <SettingsView v-else />
-      </template>
-    </main>
+    <div v-else class="shell">
+      <AppSidebar :theme="theme" @logout="logoutPanel" @toggle-theme="onToggleTheme" />
+
+      <div class="main">
+        <header class="topbar">
+          <div class="brand">
+            <span class="brand-mark"><Icon name="logo" /></span>
+            <div class="brand-name">Steam Idler</div>
+          </div>
+          <div class="row">
+            <span class="live small muted" :class="{ off: !live.connected }">{{ live.connected ? '实时' : '重连中' }}</span>
+            <button class="btn sm icon-only" :title="theme === 'dark' ? '切换到浅色' : '切换到深色'" @click="onToggleTheme">
+              <Icon :name="theme === 'dark' ? 'sun' : 'moon'" />
+            </button>
+            <button class="btn sm" @click="logoutPanel">退出</button>
+          </div>
+        </header>
+
+        <main class="content">
+          <p v-if="!live.status" class="muted">正在获取状态…</p>
+          <template v-else>
+            <AccountView v-if="page === 'account'" :account="selected" />
+            <SettingsView v-else-if="page === 'settings'" />
+            <OverviewView v-else />
+          </template>
+        </main>
+
+        <nav class="bottom-nav">
+          <button :class="{ active: page === 'overview' }" @click="openPage('overview')"><Icon name="home" />概览</button>
+          <button :class="{ active: page === 'account' }" @click="openAccountsTab"><Icon name="users" />账号</button>
+          <button :class="{ active: page === 'settings' }" @click="openPage('settings')"><Icon name="gear" />设置</button>
+        </nav>
+      </div>
+
+      <AddAccountModal v-if="ui.addOpen" />
+    </div>
   </div>
 </template>

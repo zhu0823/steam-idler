@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from 'vue';
 import { api } from '../api';
+import Icon from '../components/Icon.vue';
 
 const emit = defineEmits(['done']);
 const password = ref('');
@@ -23,16 +24,28 @@ async function submit() {
 </script>
 
 <template>
-  <section class="card narrow">
-    <h1>登录管理面板</h1>
-    <form class="form" @submit.prevent="submit">
-      <label>
-        管理员密码
-        <input v-model="password" type="password" autocomplete="current-password" required autofocus />
-      </label>
-      <p v-if="error" class="alert error">{{ error }}</p>
-      <button class="primary" :disabled="busy">{{ busy ? '登录中…' : '登录' }}</button>
+  <div class="auth-wrap">
+    <form class="card auth-card" @submit.prevent="submit">
+      <div class="brand">
+        <span class="brand-mark"><Icon name="logo" /></span>
+        <div>
+          <div class="brand-name">Steam Idler</div>
+          <div class="brand-sub">管理面板</div>
+        </div>
+      </div>
+      <div>
+        <h1 class="auth-title">登录</h1>
+        <p class="page-sub">输入管理员密码</p>
+      </div>
+      <div class="field">
+        <label for="l-pass">管理员密码</label>
+        <input id="l-pass" v-model="password" class="input" type="password" autocomplete="current-password" required autofocus />
+      </div>
+      <p v-if="error" class="callout err"><Icon name="alert" />{{ error }}</p>
+      <button class="btn primary lg" :disabled="busy">{{ busy ? '登录中…' : '登录' }}</button>
+      <p class="foot-note">
+        忘记密码：删除 <span class="mono">data/admin.json</span> 并重启容器，用新的初始化码重新设置。账号和挂卡不受影响。
+      </p>
     </form>
-    <p class="muted small">忘记密码：删除 <code>data/admin.json</code> 并重启容器，再用新的初始化码重新设置。Steam 登录状态和挂卡配置不受影响。</p>
-  </section>
+  </div>
 </template>

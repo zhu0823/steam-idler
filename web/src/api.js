@@ -71,7 +71,7 @@ export const STATE_TEXT = {
   running: ['挂卡中', 'ok'],
   paused: ['已暂停', 'warn'],
   blocked: ['其他设备游戏中', 'warn'],
-  auth_failed: ['凭据失效', 'error'],
+  auth_failed: ['凭据失效', 'err'],
 };
 
 export function accountName(account) {
@@ -81,4 +81,33 @@ export function accountName(account) {
 export function fmtTime(value) {
   if (!value) return '—';
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
+}
+
+// 时:分，跨天时带上日期
+export function fmtClock(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  const hm = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return d.toDateString() === new Date().toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
+export function fmtDate(value) {
+  if (!value) return '—';
+  return new Date(value).toLocaleDateString('zh-CN');
+}
+
+// 分钟数转为“约 X 分钟 / X.X 小时 / X.X 天”
+export function fmtDuration(minutes) {
+  if (minutes === null || minutes === undefined) return ['—', ''];
+  if (minutes < 60) return [String(Math.max(minutes, 0)), '分钟'];
+  if (minutes < 48 * 60) return [(minutes / 60).toFixed(1).replace(/\.0$/, ''), '小时'];
+  return [(minutes / 1440).toFixed(1).replace(/\.0$/, ''), '天'];
+}
+
+// 按 SteamID 稳定生成头像颜色
+const AVATAR_COLORS = ['#3d8fd6', '#6f7cff', '#e0912f', '#3fb58a', '#c264d6', '#d6584f', '#2fa7b5', '#8a9a2a'];
+export function avatarColor(id) {
+  let h = 0;
+  for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return AVATAR_COLORS[h % AVATAR_COLORS.length];
 }

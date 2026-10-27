@@ -129,3 +129,14 @@ test('数据目录不可写时给出明确提示', { skip: process.getuid && pro
   fs.chmodSync(ro, 0o700);
   assert.match(out, /不可写.*PUID\/PGID/);
 });
+
+test('掉卡记录追加保存，超过 30 天的自动清理', () => {
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  const old = new Date(Date.now() - 31 * 86400_000).toISOString();
+  store.appendDropHistory(A, [{ time: old, appid: 1, name: 'Old', count: 1 }]);
+  const list = store.appendDropHistory(A, [{ time: new Date().toISOString(), appid: 2, name: 'New', count: 2 }]);
+  assert.deepStrictEqual(list.map((e) => e.name), ['New']);
+  assert.deepStrictEqual(store.loadDropHistory(A).map((e) => e.count), [2]);
+  fs.writeFileSync(path.join(store.files.accounts, A, 'drops.json'), 'broken');
+  assert.deepStrictEqual(store.loadDropHistory(A), []);
+});

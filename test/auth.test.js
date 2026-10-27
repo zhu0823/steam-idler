@@ -163,3 +163,12 @@ test('并发提交初始化只有一个成功', async () => {
   await auth.login('3.3.3.3', 'password-one');
   await assert.rejects(auth.login('3.3.3.3', 'password-two'), { statusCode: 401 });
 });
+
+test('面板密码输错时提示剩余次数', async () => {
+  const { auth } = setup();
+  await auth.setup('1.1.1.1', auth.ensureSetupCode(), 'password123');
+  await assert.rejects(auth.login('5.5.5.5', 'bad'), { statusCode: 401, message: '密码错误，再错 4 次将锁定 15 分钟' });
+  for (let i = 0; i < 3; i++) await assert.rejects(auth.login('5.5.5.5', 'bad'));
+  await assert.rejects(auth.login('5.5.5.5', 'bad'), { message: '密码错误，已锁定 15 分钟' });
+  await assert.rejects(auth.login('5.5.5.5', 'password123'), { statusCode: 429 });
+});

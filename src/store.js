@@ -5,6 +5,7 @@
 //   accounts/<SteamID64>/
 //     token.json                该账号的 refresh token
 //     config.json               该账号的跳过列表、暂停状态、参数覆盖
+//     drops.json                该账号最近 30 天的掉卡记录
 const fs = require('fs');
 const path = require('path');
 const log = require('./log');
@@ -193,6 +194,26 @@ function saveAccountConfig(id, patch) {
   return next;
 }
 
+const DROP_HISTORY_DAYS = 30;
+
+// 掉卡记录：[{ time, appid, name, count }]
+function loadDropHistory(id) {
+  try {
+    const list = readJson(path.join(accountDir(id), 'drops.json'));
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function appendDropHistory(id, entries) {
+  const cutoff = Date.now() - DROP_HISTORY_DAYS * 86400_000;
+  const list = loadDropHistory(id).filter((e) => Date.parse(e.time) >= cutoff);
+  list.push(...entries);
+  writeJson(path.join(accountDir(id), 'drops.json'), list);
+  return list;
+}
+
 function removeAccount(id) {
   fs.rmSync(accountDir(id), { recursive: true, force: true });
 }
@@ -269,6 +290,8 @@ module.exports = {
   loadAccountConfig,
   saveAccountConfig,
   removeAccount,
+  loadDropHistory,
+  appendDropHistory,
   effectiveConfig,
   migrateLegacy,
   tokenExpiresAt,

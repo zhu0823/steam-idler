@@ -1,111 +1,125 @@
 <script setup>
-import { computed, ref, watch } from 'vue';
-import { STATE_TEXT, accountName, api, fmtTime, live } from '../api';
-import SteamLogin from '../components/SteamLogin.vue';
-import AccountSettings from '../components/AccountSettings.vue';
-import LogPanel from '../components/LogPanel.vue';
+import { computed, ref } from 'vue';
+import { accountName, api, fmtClock, fmtDate, fmtDuration } from '../api';
+import { openAdd, openPage, ui } from '../ui';
+import Icon from '../components/Icon.vue';
+import AccountAvatar from '../components/AccountAvatar.vue';
+import StateChip from '../components/StateChip.vue';
+import PhaseFlow from '../components/PhaseFlow.vue';
+import GamesTable from '../components/GamesTable.vue';
+import AccountSettingsTab from '../components/AccountSettingsTab.vue';
+import LogList from '../components/LogList.vue';
 
 const props = defineProps({ account: { type: Object, required: true } });
-const emit = defineEmits(['back']);
 
 const name = computed(() => accountName(props.account));
-const state = computed(() => STATE_TEXT[props.account.state] || ['—', 'off']);
-const playingIds = computed(() => new Set((props.account.playing || []).map((g) => g.appid)));
-const showLogin = ref(false);
-const authFailed = computed(() => props.account.state === 'auth_failed');
+const failed = computed(() => props.account.state === 'auth_failed');
+const activeGames = computed(() => props.account.games.filter((g) => !g.skipped).length);
+const eta = computed(() => fmtDuration(props.account.etaMinutes));
 const error = ref('');
 
-const games = computed(() =>
-  [...(props.account.games || [])].sort((a, b) => {
-    const rank = (g) => (playingIds.value.has(g.appid) ? 0 : g.skipped ? 2 : 1);
-    return rank(a) - rank(b) || b.hours - a.hours;
-  }),
-);
+const tabs = computed(() => [
+  ['games', '游戏', props.account.games.length],
+  ['drops', '掉卡记录', props.account.recentDrops?.length || undefined],
+  ['settings', '账号设置'],
+  ['logs', '日志'],
+]);
 
 async function action(path, confirmText) {
   if (confirmText && !window.confirm(confirmText)) return;
   error.value = '';
   try {
     await api('POST', `/api/accounts/${props.account.id}/${path}`);
-    if (path === 'remove') emit('back');
+    if (path === 'remove') openPage('overview');
   } catch (err) {
     error.value = err.message;
   }
 }
-
-watch(
-  () => live.login?.state,
-  (s) => {
-    if (s === 'authenticated') showLogin.value = false;
-  },
-);
 </script>
 
 <template>
-  <div class="row">
-    <button class="link" @click="emit('back')">← 返回账号列表</button>
+  <div class="crumb">
+    <button @click="openPage('overview')">概览</button><span>/</span><span>{{ name }}</span>
   </div>
 
-  <SteamLogin
-    v-if="authFailed || showLogin"
-    title="重新登录 Steam"
-    :reason="authFailed ? '该账号的登录凭据已失效（可能修改了密码、撤销了设备授权或已过期），请重新登录。' : ''"
-    :hint="`请使用 ${name} 登录；登录其他账号会作为新账号添加。`"
-  />
+  <div v-if="failed" class="callout err">
+    <Icon name="alert" />
+    <div>
+      <b>该账号的登录凭据已失效</b>，挂卡已停止。可能修改了 Steam 密码、撤销了设备授权或凭据已过期。
+      <div style="margin-top: 10px"><button class="btn sm primary" @click="openAdd(name)">重新登录 {{ name }}</button></div>
+    </div>
+  </div>
 
-  <section class="card">
-    <div class="card-head">
-      <div>
-        <h2>{{ name }}</h2>
-        <p class="muted small">SteamID {{ account.id }} · 凭据有效期至 {{ fmtTime(account.account?.tokenExpiresAt) }}</p>
+  <section class="card hero">
+    <AccountAvatar :account="account" large />
+    <div class="meta">
+      <div class="name">{{ name }} <StateChip :state="account.state" /></div>
+      <div class="sub">
+        <span class="mono">{{ account.id }}</span>
+        <span>凭据有效期至 {{ fmtDate(account.account?.tokenExpiresAt) }}</span>
       </div>
-      <span class="badge" :class="state[1]">{{ state[0] }}</span>
     </div>
-    <p v-if="account.lastError && account.state !== 'running'" class="alert warn small">最近错误：{{ account.lastError }}</p>
-    <div class="row wrap">
-      <button v-if="account.config.paused" class="primary" @click="action('resume')">恢复挂卡</button>
-      <button v-else @click="action('pause')">暂停挂卡</button>
-      <button :disabled="account.state !== 'running'" @click="action('check')">立即检查</button>
-      <button v-if="!authFailed" @click="showLogin = !showLogin">{{ showLogin ? '收起登录' : '重新登录' }}</button>
-      <button class="danger" @click="action('remove', `确定移除账号 ${name} 吗？会退出 Steam 登录并删除该账号的凭据和设置。`)">移除账号</button>
+    <div class="actions">
+      <template v-if="!failed">
+        <button v-if="account.config.paused" class="btn primary" @click="action('resume')"><Icon name="play" />恢复</button>
+        <button v-else class="btn" @click="action('pause')"><Icon name="pause" />暂停</button>
+        <button class="btn" :disabled="account.state !== 'running'" @click="action('check')"><Icon name="refresh" />立即检查</button>
+      </template>
+      <button class="btn ghost" @click="openAdd(name)">重新登录</button>
+      <button class="btn danger" @click="action('remove', `确定移除账号 ${name} 吗？会退出 Steam 登录并删除该账号的凭据、设置和掉卡记录。`)">移除</button>
     </div>
-    <p v-if="error" class="alert error">{{ error }}</p>
   </section>
 
-  <section class="stats">
-    <div class="stat"><span class="stat-value">{{ account.games.filter((g) => !g.skipped).length }}</span><span class="stat-label">可掉卡游戏</span></div>
-    <div class="stat"><span class="stat-value">{{ account.totalDrops }}</span><span class="stat-label">剩余卡片</span></div>
-    <div class="stat"><span class="stat-value small">{{ fmtTime(account.lastCheckAt) }}</span><span class="stat-label">上次检查</span></div>
-    <div class="stat"><span class="stat-value small">{{ fmtTime(account.nextCheckAt) }}</span><span class="stat-label">下次定时检查</span></div>
+  <p v-if="error" class="callout err"><Icon name="alert" />{{ error }}</p>
+  <p v-if="account.lastError && !failed && account.state !== 'running'" class="callout warn small"><Icon name="info" />最近错误：{{ account.lastError }}</p>
+
+  <section v-if="!failed" class="kpis">
+    <div class="card kpi">
+      <span class="kpi-label">可掉卡游戏</span>
+      <span class="kpi-value">{{ activeGames }}</span>
+      <span class="kpi-foot">{{ account.playing.length }} 个正在挂</span>
+    </div>
+    <div class="card kpi">
+      <span class="kpi-label"><Icon name="card" />待掉卡片</span>
+      <span class="kpi-value drop">{{ account.totalDrops }}</span>
+      <span class="kpi-foot">今日已掉 {{ account.dropsToday || 0 }} 张</span>
+    </div>
+    <div class="card kpi">
+      <span class="kpi-label">预计全部掉完</span>
+      <span class="kpi-value">{{ eta[0] }}<small>{{ eta[1] }}</small></span>
+      <span class="kpi-foot">按每张约 30 分钟估算</span>
+    </div>
+    <div class="card kpi">
+      <span class="kpi-label">上次检查</span>
+      <span class="kpi-value text">{{ fmtClock(account.lastCheckAt) }}</span>
+      <span class="kpi-foot">下次 {{ fmtClock(account.nextCheckAt) }}</span>
+    </div>
   </section>
+
+  <PhaseFlow v-if="!failed && account.lastCheckAt" :account="account" />
 
   <section class="card">
-    <h2>游戏列表</h2>
-    <p v-if="!account.lastCheckAt" class="muted">登录完成后会自动读取徽章页。</p>
-    <p v-else-if="games.length === 0" class="muted">没有可掉卡的游戏，程序会继续定期检查。</p>
-    <div v-else class="table-wrap">
-      <table>
-        <thead>
-          <tr><th>游戏</th><th>AppID</th><th class="num">时长 (h)</th><th class="num">剩余掉落</th><th>状态</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="g in games" :key="g.appid">
-            <td>{{ g.name }}</td>
-            <td class="mono">{{ g.appid }}</td>
-            <td class="num">{{ g.hours }}</td>
-            <td class="num">{{ g.drops }}</td>
-            <td>
-              <span v-if="playingIds.has(g.appid)" class="badge ok">挂卡中</span>
-              <span v-else-if="g.skipped" class="badge off">已跳过</span>
-              <span v-else class="badge">排队</span>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+    <div class="tabs" role="tablist">
+      <button v-for="[key, label, count] in tabs" :key="key" class="tab" :class="{ active: ui.accountTab === key }" @click="ui.accountTab = key">
+        {{ label }}<span v-if="count !== undefined" class="count">{{ count }}</span>
+      </button>
     </div>
+
+    <GamesTable v-if="ui.accountTab === 'games'" :account="account" />
+
+    <template v-else-if="ui.accountTab === 'drops'">
+      <div v-if="!account.recentDrops?.length" class="empty small">还没有掉卡记录。检查到剩余掉落减少时会记录在这里（保留 30 天）。</div>
+      <div v-else>
+        <div v-for="(d, i) in account.recentDrops" :key="i" class="drop-item">
+          <span class="mono muted small">{{ fmtClock(d.time) }}</span>
+          <span>{{ d.name }} <span class="muted mono small">{{ d.appid }}</span></span>
+          <span class="drop-text">+{{ d.count }} 张</span>
+        </div>
+      </div>
+    </template>
+
+    <AccountSettingsTab v-else-if="ui.accountTab === 'settings'" :account="account" />
+
+    <LogList v-else :filter="account.id" single />
   </section>
-
-  <AccountSettings :account="account" />
-
-  <LogPanel :account-id="account.id" />
 </template>

@@ -8,11 +8,13 @@ class AccountManager extends EventEmitter {
   /**
    * @param {object} [opts]
    * @param {(id:string)=>object} [opts.createClient] 用于测试注入 SteamUser 实例
+   * @param {object} [opts.idlerOptions] 传给每个 Idler 的额外参数（测试用）
    */
-  constructor({ createClient } = {}) {
+  constructor({ createClient, idlerOptions = {} } = {}) {
     super();
     this.setMaxListeners(0);
     this.createClient = createClient;
+    this.idlerOptions = idlerOptions;
     this.idlers = new Map();
   }
 
@@ -24,7 +26,7 @@ class AccountManager extends EventEmitter {
   }
 
   add(id) {
-    const idler = new Idler({ id, client: this.createClient ? this.createClient(id) : undefined });
+    const idler = new Idler({ ...this.idlerOptions, id, client: this.createClient ? this.createClient(id) : undefined });
     idler.on('status', () => this.emit('status', this.status()));
     this.idlers.set(idler.id, idler);
     return idler;

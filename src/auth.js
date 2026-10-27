@@ -93,6 +93,12 @@ class FailureLimiter {
     this.map.delete(key);
   }
 
+  // 锁定前还能再失败几次
+  remaining(key) {
+    const e = this.map.get(key);
+    return Math.max(this.max - (e ? e.count : 0), 0);
+  }
+
   // 防止伪造来源 IP 导致记录无限增长
   prune() {
     if (this.map.size < 10_000) return;
@@ -212,7 +218,10 @@ class Auth extends EventEmitter {
     this.ipLimiter.attempt(`login:${ip}`);
     this.globalLimiter.attempt('login');
     const { hash } = await this.hashPassword(String(password || ''), admin.salt);
-    if (!safeEqual(hash, admin.hash)) throw new AuthError(401, '密码错误');
+    if (!safeEqual(hash, admin.hash)) {
+      const left = this.ipLimiter.remaining(`login:${ip}`);
+      throw new AuthError(401, left > 0 ? `密码错误，再错 ${left} 次将锁定 15 分钟` : '密码错误，已锁定 15 分钟');
+    }
     this.ipLimiter.succeed(`login:${ip}`);
     this.globalLimiter.succeed('login');
     return this.createSession(admin);

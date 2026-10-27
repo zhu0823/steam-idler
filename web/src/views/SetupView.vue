@@ -1,11 +1,13 @@
 <script setup>
 import { ref } from 'vue';
 import { api } from '../api';
+import Icon from '../components/Icon.vue';
 
 const emit = defineEmits(['done']);
 const code = ref('');
 const password = ref('');
 const confirm = ref('');
+const where = ref('cli');
 const error = ref('');
 const busy = ref(false);
 
@@ -28,29 +30,51 @@ async function submit() {
 </script>
 
 <template>
-  <section class="card narrow">
-    <h1>初始化管理面板</h1>
-    <p class="muted">首次使用需要输入初始化码并创建管理员密码。初始化码可通过以下任一方式获取：</p>
-    <ul class="hint">
-      <li>容器日志中 <code>SETUP CODE</code> 开头的一行，例如：<code>docker compose logs steam-idler | grep "SETUP CODE"</code></li>
-      <li>NAS 的容器管理界面中查看该容器的日志</li>
-      <li>数据目录下的 <code>data/setup_code</code> 文件</li>
-    </ul>
-    <form class="form" @submit.prevent="submit">
-      <label>
-        初始化码
-        <input v-model="code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX" required />
-      </label>
-      <label>
-        管理员密码（至少 8 位）
-        <input v-model="password" type="password" autocomplete="new-password" minlength="8" required />
-      </label>
-      <label>
-        确认密码
-        <input v-model="confirm" type="password" autocomplete="new-password" minlength="8" required />
-      </label>
-      <p v-if="error" class="alert error">{{ error }}</p>
-      <button class="primary" :disabled="busy">{{ busy ? '提交中…' : '完成初始化' }}</button>
+  <div class="auth-wrap">
+    <form class="card auth-card" @submit.prevent="submit">
+      <div class="brand">
+        <span class="brand-mark"><Icon name="logo" /></span>
+        <div>
+          <div class="brand-name">Steam Idler</div>
+          <div class="brand-sub">首次使用</div>
+        </div>
+      </div>
+      <div>
+        <h1 class="auth-title">初始化管理面板</h1>
+        <p class="page-sub">输入启动日志中的初始化码，并创建管理员密码</p>
+      </div>
+
+      <div class="field">
+        <label for="s-code">初始化码</label>
+        <input id="s-code" v-model="code" class="input code-input" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX" required />
+        <span class="hint">不区分大小写，横线可省略</span>
+      </div>
+
+      <div class="stack" style="gap: 8px">
+        <div class="pill-tabs">
+          <button type="button" :class="{ on: where === 'cli' }" @click="where = 'cli'">命令行</button>
+          <button type="button" :class="{ on: where === 'nas' }" @click="where = 'nas'">NAS 界面</button>
+          <button type="button" :class="{ on: where === 'file' }" @click="where = 'file'">文件</button>
+        </div>
+        <div v-if="where === 'cli'" class="snippet mono">docker compose logs steam-idler | grep "SETUP CODE"</div>
+        <div v-else-if="where === 'nas'" class="snippet">容器管理 → steam-idler → 日志，查找以 <b>SETUP CODE</b> 开头的一行</div>
+        <div v-else class="snippet mono">data/setup_code</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="field">
+        <label for="s-pass">管理员密码</label>
+        <input id="s-pass" v-model="password" class="input" type="password" autocomplete="new-password" minlength="8" placeholder="至少 8 位" required />
+      </div>
+      <div class="field">
+        <label for="s-confirm">确认密码</label>
+        <input id="s-confirm" v-model="confirm" class="input" type="password" autocomplete="new-password" minlength="8" required />
+      </div>
+
+      <p v-if="error" class="callout err"><Icon name="alert" />{{ error }}</p>
+      <button class="btn primary lg" :disabled="busy">{{ busy ? '提交中…' : '完成初始化' }}</button>
+      <p class="foot-note">初始化完成后初始化码立即失效</p>
     </form>
-  </section>
+  </div>
 </template>
