@@ -28,6 +28,8 @@ function withTimeout(promise, ms, message) {
 
 // 多个账号的徽章页请求串行执行并留出间隔，避免同一 IP 短时间内请求过多
 const BADGE_GAP_MS = 3_000;
+// 带自定义文本更新“正在游戏”时，先清空列表再等待这么久上报新列表，见 reportPlaying()
+const PLAY_RESET_MS = 1_000;
 let badgeQueue = Promise.resolve();
 function enqueueBadgeFetch(fn, gapMs) {
   const run = badgeQueue.then(fn);
@@ -63,8 +65,9 @@ class Idler extends EventEmitter {
    * @param {object} [opts.client] 用于测试注入的 SteamUser 实例
    * @param {Function} [opts.fetchBadges] 用于测试注入的徽章页读取函数
    * @param {number} [opts.badgeGapMs] 徽章页请求之间的间隔
+   * @param {number} [opts.playResetMs] 带自定义文本更新“正在游戏”时清空后等待的时间
    */
-  constructor({ id, client, fetchBadges = fetchAllDroppable, badgeGapMs = BADGE_GAP_MS }) {
+  constructor({ id, client, fetchBadges = fetchAllDroppable, badgeGapMs = BADGE_GAP_MS, playResetMs = PLAY_RESET_MS }) {
     super();
     this.id = String(id);
     // 日志标签，登录后用账号名替换
@@ -88,6 +91,7 @@ class Idler extends EventEmitter {
     this.lastCheckAt = null;
     this.fetchBadges = fetchBadges;
     this.badgeGapMs = badgeGapMs;
+    this.playResetMs = playResetMs;
     // 上一次读取的各游戏剩余掉落，用于识别掉卡；重启后第一次检查只建立基准
     this.prevDrops = null;
     this.prevActiveDrops = null;
@@ -96,6 +100,7 @@ class Idler extends EventEmitter {
     this.checkTimer = null;
     this.retryTimer = null;
     this.intervalTimer = null;
+    this.playTimer = null;
     this.client = this.bindClient(
       client ||
         new SteamUser({
@@ -221,6 +226,7 @@ class Idler extends EventEmitter {
   }
 
   async logOffClient() {
+    clearTimeout(this.playTimer);
     if (!this.client.steamID) {
       // 正在连接或处于自动重连等待中：logOff 会关闭连接并取消 steam-user 的重连定时器，
       // 否则之后会用已删除的凭据重新登录
@@ -320,7 +326,7 @@ class Idler extends EventEmitter {
     if (same) return;
     const wasEmpty = !this.current || this.current.length === 0;
     this.current = payload;
-    if (this.client.steamID && !this.blocked) this.client.gamesPlayed(payload);
+    if (this.client.steamID && !this.blocked) this.reportPlaying(payload, wasEmpty);
     if (games.length > 0) {
       const names = games.map((g) => `${g.name}(${g.appid}, ${g.hours}h, 剩${g.drops})`).join('、');
       this.log.info(`开始挂 ${games.length} 个游戏：${names}`);
@@ -332,6 +338,19 @@ class Idler extends EventEmitter {
       this.log.info('已停止挂卡');
     }
     this.emitStatus();
+  }
+
+  /**
+   * Steam 不会用新请求覆盖已在“正在游戏”中的自定义文本（非 Steam 游戏），
+   * 自动轮换到下一个游戏时文本会消失。带文本更新时先清空列表，稍后再上报新列表。
+   */
+  reportPlaying(payload, wasEmpty) {
+    clearTimeout(this.playTimer);
+    if (wasEmpty || typeof payload[0] !== 'string') return this.client.gamesPlayed(payload);
+    this.client.gamesPlayed([]);
+    this.playTimer = setTimeout(() => {
+      if (this.current === payload && this.client.steamID && !this.blocked) this.client.gamesPlayed(payload);
+    }, this.playResetMs);
   }
 
   // 没有可挂卡游戏时挂的游戏，名称通过 PICS 查询，查询失败时只显示 appid
@@ -486,6 +505,7 @@ class Idler extends EventEmitter {
     clearInterval(this.intervalTimer);
     clearTimeout(this.checkTimer);
     clearTimeout(this.retryTimer);
+    clearTimeout(this.playTimer);
     await this.logOffClient();
   }
 }

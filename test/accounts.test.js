@@ -205,6 +205,7 @@ function loggedIn(manager, clients, id = A) {
 }
 
 const played = (client) => client.calls.filter((c) => c[0] === 'gamesPlayed').map((c) => c[1]);
+const tick = () => new Promise((r) => setTimeout(r, 5));
 
 test('退款期内的游戏不挂，许可证变化后重新计算', async () => {
   store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
@@ -258,7 +259,7 @@ test('优先队列与跳过修改后立即反映到游戏列表', async () => {
 test('卡片掉完后挂指定游戏并显示自定义状态，挂卡时文本带游戏名', async () => {
   store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
   const results = [[{ appid: 10, name: 'Hades', hours: 3, drops: 1 }], []];
-  const { manager, clients } = makeManagerWith({ fetchBadges: async () => results.shift(), badgeGapMs: 0 });
+  const { manager, clients } = makeManagerWith({ fetchBadges: async () => results.shift(), badgeGapMs: 0, playResetMs: 0 });
   manager.start();
   manager.setGlobalConfig({ farmingStatusText: '挂卡：{name}', idleStatusText: '休息中' });
   manager.setAccountConfig(A, { idleAppIds: [440, 570] });
@@ -269,7 +270,8 @@ test('卡片掉完后挂指定游戏并显示自定义状态，挂卡时文本�
   await idler.check();
   assert.deepStrictEqual(played(client).at(-1), ['挂卡：Hades', 10]);
   await idler.check();
-  assert.deepStrictEqual(played(client).at(-1), ['休息中', 440, 570]);
+  await tick();
+  assert.deepStrictEqual(played(client).slice(-2), [[], ['休息中', 440, 570]]);
   await new Promise(setImmediate);
   const s = idler.status();
   assert.deepStrictEqual(s.playing, []);
@@ -279,6 +281,33 @@ test('卡片掉完后挂指定游戏并显示自定义状态，挂卡时文本�
   manager.setAccountConfig(A, { paused: true });
   assert.deepStrictEqual(played(client).at(-1), []);
   assert.deepStrictEqual(idler.status().boosting, []);
+  await manager.shutdown();
+});
+
+test('带状态文本时自动轮换到下一个游戏，先清空再上报，文本不会丢失', async () => {
+  store.saveAccountToken(A, { accountName: 'alice', refreshToken: 'ta' });
+  const results = [
+    [{ appid: 10, name: 'Hades', hours: 3, drops: 1 }, { appid: 20, name: 'Celeste', hours: 2.5, drops: 1 }],
+    [{ appid: 20, name: 'Celeste', hours: 2.5, drops: 1 }],
+  ];
+  const { manager, clients } = makeManagerWith({ fetchBadges: async () => results.shift(), badgeGapMs: 0, playResetMs: 0 });
+  manager.start();
+  manager.setAccountConfig(A, { overrides: { ...store.loadGlobalConfig(), farmingStatusText: '挂卡中' } });
+  const idler = loggedIn(manager, clients);
+  const client = clients.get(A);
+
+  await idler.check();
+  assert.deepStrictEqual(played(client), [['挂卡中', 10]]);
+  await idler.check();
+  assert.deepStrictEqual(played(client).at(-1), []);
+  await tick();
+  assert.deepStrictEqual(played(client), [['挂卡中', 10], [], ['挂卡中', 20]]);
+
+  // 列表未变化时不重复上报
+  results.push([{ appid: 20, name: 'Celeste', hours: 2.6, drops: 1 }]);
+  await idler.check();
+  await tick();
+  assert.strictEqual(played(client).length, 3);
   await manager.shutdown();
 });
 
