@@ -16,11 +16,7 @@
 
 推送到 `main` 后，GitHub Actions 会先跑测试并构建前端，再构建 `linux/amd64`、`linux/arm64` 镜像并推送到 `ghcr.io/zhu0823/steam-idler:latest`（另带 `sha-<提交>` 标签）。
 
-仓库是私有的，镜像默认也是私有的，NAS/VPS 拉取前需要先登录 GHCR。到 GitHub → Settings → Developer settings → Personal access tokens 创建一个只勾选 `read:packages` 的 token，然后：
-
-```bash
-echo <token> | docker login ghcr.io -u zhu0823 --password-stdin
-```
+镜像是公开的，无需登录即可拉取。Fork 后使用自己构建的镜像时，把 `docker-compose.yml` 中的镜像地址改为 `ghcr.io/<你的用户名>/steam-idler:latest`；GHCR 新建的镜像默认私有，可在 GitHub 个人主页 → Packages → 该镜像 → Package settings 中改为公开，或在部署机上用只勾选 `read:packages` 的 token 执行 `docker login ghcr.io`。
 
 部署只需要 `docker-compose.yml` 和 `.env.example` 两个文件：
 
@@ -154,6 +150,7 @@ data/
 - 优先使用扫码登录，Steam 密码不经过网络传输到面板。
 - `data/accounts/` 下各账号的 `token.json` 可以直接登录对应的 Steam 账号，请勿上传或分享；`data/notify.json` 中的 Bot Token 和推送地址同样需要保密。
 - 挂卡使用的是非官方客户端协议，Valve 一般不处理单纯的挂卡行为，但请自行评估风险。
+- 发现安全问题请通过 GitHub 的 Security → Report a vulnerability 私下报告，不要直接提交公开 Issue。
 
 ## 部署选项
 
@@ -185,3 +182,7 @@ npm run dev:web      # 前端开发服务器，接口转发到后端
 npm test
 npm run build        # 构建前端到 web/dist，由后端直接托管
 ```
+
+## 免责声明
+
+本项目与 Valve Corporation 及 Steam 无任何关联，Steam 是 Valve Corporation 的商标。使用本项目即表示你自行承担账号相关的一切风险。
